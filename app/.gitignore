@@ -1,0 +1,10 @@
+# Local build artifacts are excluded by the root .gitignore (build/,
+# dist/, node_modules/, deploy/) — don't re-declare them here, because
+# a child .gitignore overrides the root's re-include
+# (!demos/app_*/app/deploy/**) and the staged deploy/ tree won't upload.
+.env
+.databricks/
+tsconfig.tsbuildinfo
+# AppKit regenerates this from config/queries/*.sql on every build
+client/src/appKitTypes.d.ts
+# package-lock.json is committed for reproducible local builds

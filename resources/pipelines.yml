@@ -1,0 +1,147 @@
+# All Spark Declarative Pipelines. Every pipeline publishes into the ONE
+# ${var.catalog}.${var.schema}; tier is encoded in the table-name prefix
+# (raw_ / curated_). Cross-pipeline reads go through fully-qualified config
+# keys that all collapse to the single schema.
+
+resources:
+  pipelines:
+
+    # ─────────────────────────── 10_ingest ───────────────────────────
+    # Counties is its own pipeline so it lands ahead of the tasks that read
+    # raw_counties downstream (dim_geography / raw_premises).
+    ingest_counties:
+      name: ${bundle.name}_ingest_counties
+      catalog: ${var.catalog}
+      schema: ${var.schema}
+      channel: ${var.sdp_channel}
+      serverless: true
+      usage_policy_id: ${var.serverless_usage_policy_id}
+      tags: { demo: customer-360-for-utilities }
+      libraries:
+        - file: { path: ../src/10_ingest/tiger_counties/raw_counties.sql }
+      configuration:
+        volume_path: /Volumes/${var.catalog}/${var.schema}/landing_tiger
+
+    # Everything else lands after its download task. Each read_files source gets a
+    # distinct *_volume_path key so they can share one pipeline. buildings_curate
+    # reads raw_buildings as a same-pipeline dependency.
+    ingest_data:
+      name: ${bundle.name}_ingest_data
+      catalog: ${var.catalog}
+      schema: ${var.schema}
+      channel: ${var.sdp_channel}
+      serverless: true
+      usage_policy_id: ${var.serverless_usage_policy_id}
+      tags: { demo: customer-360-for-utilities }
+      libraries:
+        - file: { path: ../src/10_ingest/buildings/raw_buildings.sql }
+        - file: { path: ../src/10_ingest/buildings_curate/buildings.sql }
+        - file: { path: ../src/10_ingest/weather/raw_weather_hourly.sql }
+        - file: { path: ../src/10_ingest/load_shapes/raw_all.sql }
+        - notebook: { path: ../src/10_ingest/load_shapes/raw_load_profiles.py }
+        - notebook: { path: ../src/10_ingest/load_shapes/raw_load_profiles_tidy.py }
+      configuration:
+        raw_schema: ${var.catalog}.${var.schema}
+        buildings_volume_path: /Volumes/${var.catalog}/${var.schema}/landing_buildings
+        weather_volume_path: /Volumes/${var.catalog}/${var.schema}/landing_weather/weather
+        load_shapes_volume_path: /Volumes/${var.catalog}/${var.schema}/landing_load_shapes/load_profiles
+
+    # ────────────────────────── 20_synthetic ─────────────────────────
+    # All 13 synthetic generators in ONE pipeline. Cross-generator references are
+    # fully-qualified (${var.catalog}.${var.schema}.raw_*) and resolve to
+    # same-pipeline tables, so SDP builds the dependency DAG automatically — no
+    # SQL edits needed to merge. Reads the ingest tables (curated_buildings,
+    # raw_weather_hourly, raw_load_profiles_tidy) cross-pipeline.
+    synthetic:
+      name: ${bundle.name}_synthetic
+      catalog: ${var.catalog}
+      schema: ${var.schema}
+      channel: ${var.sdp_channel}
+      serverless: true
+      usage_policy_id: ${var.serverless_usage_policy_id}
+      tags: { demo: customer-360-for-utilities }
+      # All generator SQL lives under transformations/ and is picked up by glob —
+      # to add or remove a dataset, just drop or delete a
+      # src/20_synthetic/transformations/<module>/raw_*.sql file. SDP resolves the
+      # cross-generator DAG from the fully-qualified refs, so order is irrelevant.
+      # Job notebooks (change_feeds.py) live at the tier root, outside the glob.
+      libraries:
+        - glob: { include: ../src/20_synthetic/transformations/** }
+      configuration:
+        customer_master_schema: ${var.catalog}.${var.schema}
+        der_adoption_schema: ${var.catalog}.${var.schema}
+        billing_schema: ${var.catalog}.${var.schema}
+        outages_schema: ${var.catalog}.${var.schema}
+        complaints_schema: ${var.catalog}.${var.schema}
+        genesys_schema: ${var.catalog}.${var.schema}
+        dsm_programs_schema: ${var.catalog}.${var.schema}
+        buildings_table: ${var.catalog}.${var.schema}.curated_buildings
+        der_adoption_table: ${var.catalog}.${var.schema}.raw_der_customer
+        weather_table: ${var.catalog}.${var.schema}.raw_weather_hourly
+        load_shapes_table: ${var.catalog}.${var.schema}.raw_load_profiles_tidy
+        ami_table: ${var.catalog}.${var.schema}.raw_meter_readings
+        weather_calendar_map_table: ${var.catalog}.${var.schema}.weather_calendar_map
+        target_geoids: ${var.target_geoids}
+        seed_lat: ${var.seed_lat}
+        seed_lon: ${var.seed_lon}
+        customer_sample_size: ${var.customer_sample_size}
+        random_seed: ${var.random_seed}
+        as_of_date: ${var.as_of_date}
+        target_state: ${var.target_state}
+        history_months: ${var.history_months}
+        outages_per_year: ${var.outages_per_year}
+        llm_endpoint: ${var.llm_endpoint}
+
+    # ─────────────────────────── 30_curated ──────────────────────────
+    curated:
+      name: ${bundle.name}_curated
+      catalog: ${var.catalog}
+      schema: ${var.schema}
+      channel: ${var.sdp_channel}
+      serverless: true
+      usage_policy_id: ${var.serverless_usage_policy_id}
+      tags: { demo: customer-360-for-utilities }
+      # All dim/fact/bridge SQL lives under transformations/ and is picked up by
+      # glob — add or remove a curated table by dropping or deleting a
+      # src/30_curated/transformations/*.sql file. SDP builds the DAG from table
+      # refs, so order doesn't matter. The two Job notebooks (table_comments.py,
+      # metric_views.py) live at the tier root, outside the glob.
+      libraries:
+        - glob: { include: ../src/30_curated/transformations/** }
+      configuration:
+        customer_master_schema: ${var.catalog}.${var.schema}
+        der_adoption_schema: ${var.catalog}.${var.schema}
+        ami_schema: ${var.catalog}.${var.schema}
+        billing_schema: ${var.catalog}.${var.schema}
+        outages_schema: ${var.catalog}.${var.schema}
+        complaints_schema: ${var.catalog}.${var.schema}
+        digital_schema: ${var.catalog}.${var.schema}
+        cx_legacy_schema: ${var.catalog}.${var.schema}
+        cx_genesys_schema: ${var.catalog}.${var.schema}
+        surveys_schema: ${var.catalog}.${var.schema}
+        social_schema: ${var.catalog}.${var.schema}
+        dsm_programs_schema: ${var.catalog}.${var.schema}
+        assistance_schema: ${var.catalog}.${var.schema}
+        tiger_counties_schema: ${var.catalog}.${var.schema}
+        as_of_date: ${var.as_of_date}
+        history_months: ${var.history_months}
+
+    # ─────────────────────────────── 40_ml ──────────────────────────────
+    ml_features:
+      name: ${bundle.name}_ml_features
+      catalog: ${var.catalog}
+      schema: ${var.schema}
+      channel: ${var.sdp_channel}
+      serverless: true
+      usage_policy_id: ${var.serverless_usage_policy_id}
+      tags: { demo: customer-360-for-utilities }
+      # One file: entry per model's feature view. To add a model, drop a
+      # src/40_ml/<model>/ folder and add its features.sql line here (the
+      # matching train/score/comments tasks are copied in jobs.yml — see there).
+      libraries:
+        - file: { path: ../src/40_ml/ev_detector/features.sql }
+        - file: { path: ../src/40_ml/complaint_predictor/features.sql }
+        - file: { path: ../src/40_ml/pv_detector/features.sql }
+      configuration:
+        curated_schema: ${var.catalog}.${var.schema}
+        der_adoption_schema: ${var.catalog}.${var.schema}

@@ -1,0 +1,28 @@
+# On startup, substitute the {{catalog}}/{{schema}} placeholders in the analytics
+# query files with the injected env (AppKit reads query .sql files verbatim — no
+# templating — so we bind them to this environment at boot), then launch the
+# server. Keeps the app deploy-anywhere: no rebuild per environment.
+command:
+  - bash
+  - -c
+  - |
+    for f in config/queries/*.sql; do
+      sed -i "s#{{catalog}}#${DATABRICKS_CATALOG}#g; s#{{schema}}#${DATABRICKS_SCHEMA}#g" "$f"
+    done
+    exec node build/server.mjs
+env:
+  - name: NODE_ENV
+    value: production
+  - name: DATABRICKS_WAREHOUSE_ID
+    valueFrom: sql-warehouse
+  # Per-environment values. These MUST be correct here: the DAB app resource's
+  # `config:` env override (resources/app.yml) is deprecated and current CLI
+  # versions (>= v1.x) no longer apply it at deploy — the app runs with exactly
+  # what this file says. Point these at your catalog/schema/Genie space when
+  # deploying elsewhere.
+  - name: DATABRICKS_CATALOG
+    value: timstanton_stable
+  - name: DATABRICKS_SCHEMA
+    value: customer_360
+  - name: DATABRICKS_GENIE_SPACE_ID
+    value: 01f15b1323df18a0a4af1340c92ccef0

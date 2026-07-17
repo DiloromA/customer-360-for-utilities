@@ -1,0 +1,109 @@
+# Customer 360 for Utilities — single Databricks Asset Bundle.
+#
+# Everything (ingest → synthetic → curated star schema → ML → app) deploys from
+# this one bundle into ONE catalog and ONE schema, orchestrated by one Job.
+#
+# ┌── To deploy into a new environment, you only change the two vars below ──┐
+# │   catalog : an existing Unity Catalog you can create schemas in          │
+# │   schema  : the single schema this demo creates and owns                 │
+# └─────────────────────────────────────────────────────────────────────────┘
+# Override at deploy time without editing this file, e.g.:
+#   databricks bundle deploy --var catalog=my_catalog --var schema=customer_360
+# or set BUNDLE_VAR_catalog / BUNDLE_VAR_schema in the environment.
+
+bundle:
+  name: customer_360
+
+include:
+  - shared/compute_defaults.yml
+  - resources/pipelines.yml
+  - resources/jobs.yml
+  - resources/app.yml
+
+variables:
+  # ── The two you must set per environment ──────────────────────────────
+  catalog:
+    description: "Existing Unity Catalog to deploy into (must already exist)."
+    default: main
+  schema:
+    description: "The single schema this demo creates and owns. All raw_/dim_/fact_/bridge_/metric_/ml_/app_ tables land here."
+    default: customer_360_test
+
+  # ── App inputs ────────────────────────────────────────────────────────
+  warehouse_id:
+    description: "SQL warehouse ID used by the app and Genie space. Set per environment."
+    default: ""
+  genie_space_id:
+    description: "Genie space ID for the app's 'Ask the Map'. Created by the genie_space setup job; leave blank on first deploy, then set."
+    default: ""
+
+  # ── Scope knobs (to be unified by the boundary spine — see ARCHITECTURE.md §10) ─
+  states_filter:
+    description: "FEMA building download: comma-separated state names. Default Michigan (the demo territory)."
+    default: "Michigan"
+  state_fips:
+    description: "TIGER county filter: two-digit state FIPS. 26 = Michigan."
+    default: "26"
+  tiger_year:
+    description: "Census TIGER/Line vintage year."
+    default: "2024"
+  target_geoids:
+    description: "customer_master premise sampling + weather/buildings download scoping: comma-separated county GEOIDs (Detroit tri-county core)."
+    default: "26163,26125,26099"
+  seed_lat:
+    description: "customer_master premise sampling: latitude of the contiguous-saturation seed point. Default sits on the Detroit/Oakland county line near the 8 Mile corridor, spanning both urban and suburban tracts."
+    default: "42.45"
+  seed_lon:
+    description: "customer_master premise sampling: longitude of the contiguous-saturation seed point (paired with seed_lat)."
+    default: "-83.15"
+  target_state:
+    description: "Load-shapes state code."
+    default: "MI"
+  history_months:
+    description: "Display-window length in months, trailing back from as_of_date. One source weather/shape year is mapped onto this whole window via weather_calendar_map."
+    default: "24"
+  outages_per_year:
+    description: "Target distinct outage events per year."
+    default: "7000"
+  customer_sample_size:
+    description: "Target number of premises to sample (stratified). The seeded demo scale (~1,000)."
+    default: "1000"
+  random_seed:
+    description: "Deterministic synthesis seed."
+    default: "42"
+  as_of_date:
+    description: "The demo's 'now' — anchors all effective-dating and the trailing history_months display window."
+    default: "2018-12-31"
+
+  # ── Runtime endpoints / secrets ───────────────────────────────────────
+  llm_endpoint:
+    description: "Foundation Model API endpoint for verbatim generation (complaints/social/surveys)."
+    default: "databricks-meta-llama-3-1-8b-instruct"
+  download_concurrency:
+    description: "Max parallel FEMA state downloads."
+    default: "12"
+
+# The app's built deploy tree is gitignored, but must still be uploaded to the
+# workspace on `bundle deploy`. sync.include force-includes it past .gitignore.
+sync:
+  include:
+    - app/deploy/**
+
+workspace:
+  root_path: ~/${bundle.name}
+
+resources:
+  schemas:
+    demo_schema:
+      name: ${var.schema}
+      catalog_name: ${var.catalog}
+      properties:
+        managed_by: customer-360-for-utilities
+        area: customer_360
+
+targets:
+  dev:
+    mode: development
+    default: true
+  prod:
+    mode: production

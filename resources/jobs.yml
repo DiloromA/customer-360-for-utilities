@@ -1,0 +1,229 @@
+# The single orchestrating Job. Task DAG:
+#   10_ingest (downloads + SDP) → 20_synthetic (SDP) → 30_curated (SDP + notebooks)
+#   → 40_ml (features SDP + train/score/comments)
+# App-setup jobs (Genie space, focus set) live in resources/app.yml and run
+# separately after the app is deployed.
+#
+# All 10_ingest downloads are keyless/anonymous (public OEDI S3, FEMA, TIGER) —
+# there are no optional or credentialed modules in the DAG.
+
+resources:
+  jobs:
+    customer_360_job:
+      name: ${bundle.name}_job
+      usage_policy_id: ${var.serverless_usage_policy_id}
+      tags: { demo: customer-360-for-utilities }
+      environments:
+        - environment_key: default
+          spec:
+            client: ${var.serverless_version}
+        - environment_key: geo
+          spec:
+            client: ${var.serverless_version}
+            dependencies:
+              - pyogrio==0.10.0
+      tasks:
+        # ─────────────────────────── 10_ingest ──────────────────────────
+        # Download tasks land external data into volumes; two SDP pipelines
+        # (ingest_counties, ingest_data) materialize it. Counties is separate
+        # so it lands ahead of the downstream tasks that read raw_counties.
+        - task_key: fema_list_states
+          environment_key: geo
+          notebook_task:
+            notebook_path: ../src/10_ingest/buildings/00_list_states.py
+            base_parameters:
+              states_filter: ${var.states_filter}
+        - task_key: fema_download
+          depends_on: [{ task_key: fema_list_states }]
+          for_each_task:
+            concurrency: ${var.download_concurrency}
+            inputs: "{{tasks.fema_list_states.values.states}}"
+            task:
+              task_key: download_one
+              environment_key: geo
+              notebook_task:
+                notebook_path: ../src/10_ingest/buildings/01_download_state.py
+                base_parameters:
+                  catalog: ${var.catalog}
+                  schema: ${var.schema}
+                  volume: landing_buildings
+                  state: "{{input.state}}"
+                  s3_key: "{{input.s3_key}}"
+                  geoids: ${var.target_geoids}
+        - task_key: tiger_download
+          environment_key: geo
+          notebook_task:
+            notebook_path: ../src/10_ingest/tiger_counties/01_download_tiger.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              volume: landing_tiger
+              tiger_year: ${var.tiger_year}
+              state_fips: ${var.state_fips}
+        - task_key: pipe_ingest_counties
+          depends_on: [{ task_key: tiger_download }]
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.ingest_counties.id}
+        - task_key: weather_download
+          environment_key: default
+          notebook_task:
+            notebook_path: ../src/10_ingest/weather/01_download.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              volume: landing_weather
+              states: ${var.target_state}
+              geoids: ${var.target_geoids}
+        - task_key: loadshapes_download
+          environment_key: default
+          notebook_task:
+            notebook_path: ../src/10_ingest/load_shapes/01_download.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              volume: landing_load_shapes
+              states: ${var.target_state}
+        - task_key: pipe_ingest_data
+          depends_on:
+            - { task_key: fema_download }
+            - { task_key: weather_download }
+            - { task_key: loadshapes_download }
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.ingest_data.id}
+
+        # ───────────────────────── 20_synthetic ─────────────────────────
+        # One pipeline builds all 13 generators (SDP resolves the intra-pipeline
+        # DAG from the fully-qualified refs). Reads the ingest tables it needs.
+        - task_key: pipe_synthetic
+          depends_on: [{ task_key: pipe_ingest_data }]
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.synthetic.id}
+        - task_key: cm_change_feeds
+          depends_on: [{ task_key: pipe_synthetic }]
+          environment_key: default
+          notebook_task:
+            notebook_path: ../src/20_synthetic/change_feeds.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              random_seed: ${var.random_seed}
+              as_of_date: ${var.as_of_date}
+
+        # ─────────────────────────── 30_curated ─────────────────────────
+        - task_key: pipe_curated
+          depends_on:
+            - { task_key: pipe_ingest_counties }
+            - { task_key: cm_change_feeds }
+            - { task_key: pipe_synthetic }
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.curated.id}
+            # Full-refresh so the SCD2 streaming tables rebuild cleanly each run.
+            # cm_change_feeds re-creates raw_*_changes (new Delta id) every run, which
+            # otherwise breaks the AUTO CDC streaming checkpoint.
+            full_refresh: true
+        - task_key: curated_table_comments
+          depends_on: [{ task_key: pipe_curated }]
+          environment_key: default
+          notebook_task:
+            notebook_path: ../src/30_curated/table_comments.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+        - task_key: curated_metric_views
+          depends_on: [{ task_key: curated_table_comments }]
+          environment_key: default
+          notebook_task:
+            notebook_path: ../src/30_curated/metric_views.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              as_of_date: ${var.as_of_date}
+
+        # ─────────────────────────────── 40_ml ──────────────────────────
+        # One task group per model, all reading the curated layer. To add a
+        # model, drop a src/40_ml/<model>/ folder (features.sql + train.py +
+        # score.py + table_comments.py) and copy the four tasks below, renaming
+        # ml_* → <model>_* and repointing the notebook paths. features.sql is
+        # picked up automatically by the ml_features pipeline glob.
+        - task_key: ml_build_features
+          depends_on: [{ task_key: pipe_curated }]
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.ml_features.id}
+        - task_key: ev_detector_train
+          depends_on: [{ task_key: ml_build_features }]
+          environment_key: default
+          notebook_task:
+            notebook_path: ../src/40_ml/ev_detector/train.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              experiment_name: ${workspace.file_path}/ml_experiment
+        - task_key: ev_detector_score
+          depends_on: [{ task_key: ev_detector_train }]
+          environment_key: default
+          notebook_task:
+            notebook_path: ../src/40_ml/ev_detector/score.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+        - task_key: ev_detector_table_comments
+          depends_on: [{ task_key: ev_detector_score }]
+          environment_key: default
+          notebook_task:
+            notebook_path: ../src/40_ml/ev_detector/table_comments.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+        - task_key: complaint_predictor_train
+          depends_on: [{ task_key: ml_build_features }]
+          environment_key: default
+          notebook_task:
+            notebook_path: ../src/40_ml/complaint_predictor/train.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              experiment_name: ${workspace.file_path}/ml_experiment
+              as_of_date: ${var.as_of_date}
+        - task_key: complaint_predictor_score
+          depends_on: [{ task_key: complaint_predictor_train }]
+          environment_key: default
+          notebook_task:
+            notebook_path: ../src/40_ml/complaint_predictor/score.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+        - task_key: complaint_predictor_table_comments
+          depends_on: [{ task_key: complaint_predictor_score }]
+          environment_key: default
+          notebook_task:
+            notebook_path: ../src/40_ml/complaint_predictor/table_comments.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+        - task_key: pv_detector_train
+          depends_on: [{ task_key: ml_build_features }]
+          environment_key: default
+          notebook_task:
+            notebook_path: ../src/40_ml/pv_detector/train.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              experiment_name: ${workspace.file_path}/ml_experiment
+        - task_key: pv_detector_score
+          depends_on: [{ task_key: pv_detector_train }]
+          environment_key: default
+          notebook_task:
+            notebook_path: ../src/40_ml/pv_detector/score.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+        - task_key: pv_detector_table_comments
+          depends_on: [{ task_key: pv_detector_score }]
+          environment_key: default
+          notebook_task:
+            notebook_path: ../src/40_ml/pv_detector/table_comments.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+
+      queue: { enabled: true }

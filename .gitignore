@@ -1,0 +1,37 @@
+# Build artifacts
+dist/
+build/
+node_modules/
+*.tsbuildinfo
+
+# The app's staged deploy tree is a local build artifact (rebuilt by
+# `npm run build`). It is uploaded to the workspace by `databricks bundle deploy`
+# via the `sync.include` entry in databricks.yml — NOT tracked in git.
+app/deploy/
+
+# Internal npm registry config + lockfile (contain an internal proxy hostname).
+# Kept out of the public repo per the "no internal hostnames" rule. Local
+# `npm install` still uses .npmrc from disk; regenerate the lockfile against the
+# public registry before a true public release.
+app/.npmrc
+app/package-lock.json
+
+# Databricks bundle state
+.databricks/
+.databricks-resources.json
+
+# OS / editor
+.DS_Store
+
+# Local MCP config (machine-specific absolute paths)
+.mcp.json
+
+# Local AI tooling (machine-specific absolute paths; .claude holds ~165MB of
+# ai-dev-kit-installed skill copies)
+.ai-dev-kit/
+.claude/
+.cursor/
+
+# Python bytecode
+__pycache__/
+*.pyc

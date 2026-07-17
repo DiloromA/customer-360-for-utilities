@@ -1,0 +1,27 @@
+# Shared compute defaults for all bundles.
+# Include this in every bundle to ensure consistent serverless and SDP settings.
+#
+# - Notebook tasks: set `environment_key: default` on each task,
+#   and add the _serverless_env anchor to the job's `environments` list.
+# - SDP pipelines: set `channel: ${var.sdp_channel}` on each pipeline.
+#
+# Update defaults here to roll ALL bundles forward at once.
+
+# Avoid `[dev <user>]_` prefixes on bundle-defined UC schemas in development mode.
+experimental:
+  skip_name_prefix_for_schema: true
+
+variables:
+  serverless_version:
+    description: "Serverless compute client version"
+    default: "5"
+
+  sdp_channel:
+    description: "Spark Declarative Pipelines channel (current | preview)"
+    default: preview
+
+  # Optional Unity Catalog serverless usage policy.
+  # Set for your workspace: BUNDLE_VAR_serverless_usage_policy_id=<uuid> (or databricks bundle deploy --var)
+  serverless_usage_policy_id:
+    description: "Optional Unity Catalog serverless usage policy ID for serverless jobs and pipelines"
+    default: ""
