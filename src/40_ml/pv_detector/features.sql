@@ -32,7 +32,7 @@ AS
 
 WITH agr AS (
   -- fact_meter_readings_daily is physical (service_point) grain, not
-  -- customer-stamped (temporal-realism §5.2: an occupant can change
+  -- customer-stamped (temporal-realism: an customer can change
   -- mid-window). Resolve customer_id per reading via the as-of agreement in
   -- force on that reading's own date.
   SELECT service_point_id, customer_id, effective_date, termination_date
@@ -57,7 +57,7 @@ daily_by_sp AS (
 
 , daily AS (
   -- Sum across sibling service_points per customer-day first. A sub-metered
-  -- commercial customer (temporal-realism §5.3) has 2-5 CONCURRENT
+  -- commercial customer has 2-5 CONCURRENT
   -- service_points, so without this collapse, the midday-dip signature below
   -- would be computed over per-METER daily values instead of the customer's
   -- true daily total (each meter's own midday dip is a weaker, noisier

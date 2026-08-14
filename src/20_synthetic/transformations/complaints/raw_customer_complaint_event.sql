@@ -52,8 +52,8 @@ WITH
 
 -- Collapse to (account, calendar month) BEFORE windowing the trailing
 -- average or rolling the complaint dice. A sub-metered commercial account
--- (temporal-realism §5.3) bills one row PER usage_point per month — and a
--- relocation's transition month (temporal-realism §5.1) already bills one
+-- bills one row PER service point per month — and a
+-- relocation's transition month already bills one
 -- row per premise — so without this collapse, a ROW-count-based "11
 -- PRECEDING" window would silently desync from "11 calendar months back" the
 -- moment any month contributes more than one row, AND a customer with

@@ -1,11 +1,11 @@
 -- Owner (portfolio) profile header — party-level summary for the Owner
--- inspector (entity-grain-design.md §6.2/§4.2). Keyed by owner_number, the
+-- inspector. Keyed by owner_number, the
 -- natural dim_customer.customer_number — same STRING-key-to-client convention
 -- as account_number/premise_number (see premise_header.sql's note).
 --
--- n_currently_vacant counts owned premises with no current occupant link
+-- n_currently_vacant counts owned premises with no current customer link
 -- today; n_historical_vacancies counts owned premises that ever carried a
--- closed occupancy_type='vacant' link (the landlord-hero's billing-reverts
+-- closed tenancy_type='vacant' link (the landlord-hero's billing-reverts
 -- episode — see raw_account_premise_link.sql). avg_monthly_kwh_portfolio is
 -- the trailing-12mo average billed kWh across every premise in the
 -- portfolio, same window dim_customer.avg_monthly_kwh_12mo uses.
@@ -24,7 +24,7 @@ portfolio AS (
   WHERE bpo.is_current
 ),
 occ AS (
-  -- Current occupant per owned premise (no row = currently vacant).
+  -- Current customer per owned premise (no row = currently vacant).
   SELECT b.premise_id, b.account_id
   FROM {{catalog}}.{{schema}}.bridge_account_premise b
   JOIN portfolio p ON p.premise_id = b.premise_id
@@ -34,12 +34,12 @@ historical_vacancy AS (
   SELECT DISTINCT b.premise_id
   FROM {{catalog}}.{{schema}}.bridge_account_premise b
   JOIN portfolio p ON p.premise_id = b.premise_id
-  WHERE b.occupancy_type = 'vacant'
+  WHERE b.tenancy_type = 'vacant'
 ),
 kwh AS (
   -- Sum across sibling service_points per premise-month first — a
-  -- sub-metered premise (temporal-realism §5.3) bills one
-  -- fact_customer_billing row PER usage_point, so AVG over the raw rows
+  -- sub-metered premise bills one
+  -- fact_customer_billing row PER service point, so AVG over the raw rows
   -- would average per-METER kwh, not the portfolio's true monthly total.
   SELECT AVG(month_total_kwh) AS avg_monthly_kwh
   FROM (

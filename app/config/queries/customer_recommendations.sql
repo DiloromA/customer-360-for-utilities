@@ -12,9 +12,11 @@
 -- @param account_number STRING
 
 WITH acct AS (
-  SELECT account_id, customer_id, premise_id
-  FROM {{catalog}}.{{schema}}.dim_account
-  WHERE account_number = :account_number
+  SELECT a.account_id, a.customer_id, acp.premise_id
+  FROM {{catalog}}.{{schema}}.dim_account a
+  LEFT JOIN {{catalog}}.{{schema}}.account_current_premise acp
+    ON acp.account_id = a.account_id
+  WHERE a.account_number = :account_number
 ),
 enrolled AS (
   SELECT DISTINCT fpe.program_id

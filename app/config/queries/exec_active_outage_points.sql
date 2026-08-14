@@ -1,6 +1,6 @@
 -- Executive map — currently-out customers within the viewport, for the Active
 -- outages (live) layer's per-customer dots. One row per premise whose current
--- occupant is without power right now. Carries the parent incident's cause /
+-- customer is without power right now. Carries the parent incident's cause /
 -- crew status / restoration ETA for the dot tooltip.
 
 -- @param south STRING  -- viewport bounds (CAST to DOUBLE)

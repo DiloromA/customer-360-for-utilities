@@ -21,6 +21,7 @@ import { Plugin, toPlugin, type IAppRouter } from "@databricks/appkit";
 import type { Request, Response } from "express";
 import { resolveHost, resolveToken, runStatement, resolveCatalog, resolveSchema } from "./dbx";
 import { buildFilterSql } from "./geniePlugin";
+import { type GrainedFocusSummary, isValidGrain } from "./grainContract";
 
 interface AttrFilters {
   customerClasses?: string;
@@ -73,9 +74,18 @@ class FocusPlugin extends Plugin {
           hex?: { cellId?: string; resolution?: number };
           hexes?: string[];
           hexRes?: number;
+          premiseNumbers?: (string | number)[];
           accountNumbers?: (string | number)[];
           customerIds?: (string | number)[];
+          // Grain-contract fields: identify which grain and entity defined
+          // this cohort. Stored in the table; used by computeSummary.
+          grain?: string;
+          subjectKey?: string;
         };
+        const grain = isValidGrain(b.grain) ? b.grain : null;
+        const subjectKey = (typeof b.subjectKey === "string" && b.subjectKey) ? b.subjectKey : null;
+        const grainSql = grain ? `'${grain}'` : "CAST(NULL AS STRING)";
+        const subjectKeySql = subjectKey ? `'${subjectKey.replace(/'/g, "''")}'` : "CAST(NULL AS STRING)";
         const sid = b.sessionId;
         if (!sid || !SESSION_RE.test(sid)) {
           res.status(400).json({ error: "Missing or invalid 'sessionId'." });
@@ -97,10 +107,13 @@ class FocusPlugin extends Plugin {
         //   4. hexes          — a box/lasso drawn over the zoomed-out choropleth
         //      {hexes[], hexRes}; the customers whose premise falls in any of
         //      those cells (WYSIWYG — matches exactly what's outlined).
-        //   5. accountNumbers — exact account_number strings (box/lasso
-        //      selection over dots); resolved to customer_id server-side via
-        //      dim_account.
-        //   6. customerIds    — integer ids inlined as VALUES (server-internal use).
+        //   5. premiseNumbers — exact premise_number strings (box/lasso over dots
+        //      under Premise grain); resolved to (customer_id, premise_id) so the
+        //      cohort is EXACTLY the drawn premises, no cross-site spread.
+        //   6. accountNumbers — exact account_number strings (box/lasso over dots
+        //      under Customer grain); resolved to customer_id via dim_account with
+        //      premise_id NULL, so the cohort spreads to all of a customer's sites.
+        //   7. customerIds    — integer ids inlined as VALUES (server-internal use).
         let selectClause: string;
         if (typeof b.sql === "string" && b.sql.trim()) {
           // Query-defined: wrap the supplied SQL and project just customer_id.
@@ -115,12 +128,12 @@ class FocusPlugin extends Plugin {
             return;
           }
           selectClause =
-            `SELECT DISTINCT '${sid}' AS session_id, t.customer_id, current_timestamp() AS created_at, CAST(NULL AS BIGINT) AS premise_id\n` +
+            `SELECT DISTINCT '${sid}' AS session_id, t.customer_id, current_timestamp() AS created_at, CAST(NULL AS BIGINT) AS premise_id, ${grainSql} AS grain, ${subjectKeySql} AS subject_key\n` +
             `FROM ( ${inner} ) t\nWHERE t.customer_id IS NOT NULL`;
         } else if (b.filters && hasAnyFilter(b.filters)) {
           const pred = buildFilterSql(b.filters); // leading " AND …"
           selectClause =
-            `SELECT DISTINCT '${sid}' AS session_id, c.customer_id, current_timestamp() AS created_at, CAST(NULL AS BIGINT) AS premise_id\n` +
+            `SELECT DISTINCT '${sid}' AS session_id, c.customer_id, current_timestamp() AS created_at, CAST(NULL AS BIGINT) AS premise_id, ${grainSql} AS grain, ${subjectKeySql} AS subject_key\n` +
             `FROM ${catalog}.${schema}.dim_customer c\nWHERE 1=1${pred}`;
         } else if (b.hex && b.hex.cellId) {
           // A clicked choropleth cell → the customers whose current premise falls
@@ -132,8 +145,17 @@ class FocusPlugin extends Plugin {
             res.status(400).json({ error: "Invalid 'hex' { cellId, resolution }." });
             return;
           }
+          // Under Customer grain, premise_id is NULL so the exec_map_cells
+          // guard (fs.premise_id IS NULL OR fs.premise_id = p.premise_id) lights
+          // every hex holding any premise of the cohort's customers — grain-following
+          // spread. Under Premise/Owner grain, keep b.premise_id so only the
+          // clicked hex lights. TODO(owner-grain-spread): Owner grain could later
+          // expand to all premises of the same owner entity; for now, premise-pinned.
+          const premiseExpr = grain === "customer"
+            ? "CAST(NULL AS BIGINT)"
+            : "b.premise_id";
           selectClause =
-            `SELECT DISTINCT '${sid}' AS session_id, b.customer_id, current_timestamp() AS created_at, b.premise_id\n` +
+            `SELECT DISTINCT '${sid}' AS session_id, b.customer_id, current_timestamp() AS created_at, ${premiseExpr} AS premise_id, ${grainSql} AS grain, ${subjectKeySql} AS subject_key\n` +
             `FROM ${catalog}.${schema}.dim_premise_h3 h3\n` +
             `JOIN ${catalog}.${schema}.bridge_account_premise b ON b.premise_id = h3.premise_id AND b.is_current\n` +
             `WHERE h3.h3_res${hexRes} = h3_stringtoh3('${cellId}')`;
@@ -153,11 +175,41 @@ class FocusPlugin extends Plugin {
             return;
           }
           const inList = cells.map((c) => `h3_stringtoh3('${c}')`).join(",");
+          // Same grain-following logic as the single-hex branch above.
+          const premiseExprMulti = grain === "customer"
+            ? "CAST(NULL AS BIGINT)"
+            : "b.premise_id";
           selectClause =
-            `SELECT DISTINCT '${sid}' AS session_id, b.customer_id, current_timestamp() AS created_at, b.premise_id\n` +
+            `SELECT DISTINCT '${sid}' AS session_id, b.customer_id, current_timestamp() AS created_at, ${premiseExprMulti} AS premise_id, ${grainSql} AS grain, ${subjectKeySql} AS subject_key\n` +
             `FROM ${catalog}.${schema}.dim_premise_h3 h3\n` +
             `JOIN ${catalog}.${schema}.bridge_account_premise b ON b.premise_id = h3.premise_id AND b.is_current\n` +
             `WHERE h3.h3_res${hexRes} IN (${inList})`;
+        } else if (Array.isArray(b.premiseNumbers) && b.premiseNumbers.length > 0) {
+          // A box/lasso drawn over the dots UNDER Premise grain → the exact
+          // premises drawn (WYSIWYG). We resolve premise_number → (customer_id,
+          // premise_id) and write a REAL premise_id, so the `in_focus` join
+          // (fs.premise_id IS NULL OR fs.premise_id = b.premise_id) lights ONLY
+          // the drawn dots — not every other premise of the same customers. The
+          // customer-grain box path stays on `accountNumbers` below (premise_id
+          // NULL), which SHOULD spread to all of a customer's sites. Same
+          // grain-following contract as the hex branches above.
+          const prems = b.premiseNumbers
+            .map((v) => String(v).trim())
+            .filter((v) => /^[A-Za-z0-9_-]+$/.test(v));
+          if (prems.length === 0) {
+            res.status(400).json({ error: "No valid premiseNumbers." });
+            return;
+          }
+          if (prems.length > EXPLICIT_ID_CAP) {
+            res.status(400).json({ error: `Too many premiseNumbers (>${EXPLICIT_ID_CAP}); use a query-defined cohort.` });
+            return;
+          }
+          const inList = prems.map((p) => `'${p}'`).join(",");
+          selectClause =
+            `SELECT DISTINCT '${sid}' AS session_id, b.customer_id, current_timestamp() AS created_at, b.premise_id AS premise_id, ${grainSql} AS grain, ${subjectKeySql} AS subject_key\n` +
+            `FROM ${catalog}.${schema}.bridge_account_premise b\n` +
+            `JOIN ${catalog}.${schema}.dim_premise p ON p.premise_id = b.premise_id\n` +
+            `WHERE b.is_current AND p.premise_number IN (${inList})`;
         } else if (Array.isArray(b.accountNumbers) && b.accountNumbers.length > 0) {
           const accts = b.accountNumbers
             .map((v) => String(v).trim())
@@ -172,21 +224,21 @@ class FocusPlugin extends Plugin {
           }
           const inList = accts.map((a) => `'${a}'`).join(",");
           selectClause =
-            `SELECT DISTINCT '${sid}' AS session_id, a.customer_id, current_timestamp() AS created_at, CAST(NULL AS BIGINT) AS premise_id\n` +
+            `SELECT DISTINCT '${sid}' AS session_id, a.customer_id, current_timestamp() AS created_at, CAST(NULL AS BIGINT) AS premise_id, ${grainSql} AS grain, ${subjectKeySql} AS subject_key\n` +
             `FROM ${catalog}.${schema}.dim_account a\nWHERE a.account_number IN (${inList})`;
         } else {
           const ids = (b.customerIds ?? [])
             .map((v) => String(v).trim())
             .filter((v) => /^-?\d+$/.test(v));
           if (ids.length === 0) {
-            res.status(400).json({ error: "Provide 'sql', 'filters', 'accountNumbers', or a non-empty 'customerIds'." });
+            res.status(400).json({ error: "Provide 'sql', 'filters', 'premiseNumbers', 'accountNumbers', or a non-empty 'customerIds'." });
             return;
           }
           if (ids.length > EXPLICIT_ID_CAP) {
             res.status(400).json({ error: `Too many explicit ids (>${EXPLICIT_ID_CAP}); use a query-defined cohort.` });
             return;
           }
-          const values = ids.map((id) => `('${sid}', ${id}, current_timestamp(), NULL)`).join(",\n");
+          const values = ids.map((id) => `('${sid}', ${id}, current_timestamp(), NULL, ${grainSql}, ${subjectKeySql})`).join(",\n");
           selectClause = `VALUES\n${values}`;
         }
 
@@ -195,13 +247,15 @@ class FocusPlugin extends Plugin {
         // clause doesn't parse with one, and Delta's ALTER TABLE ADD COLUMN
         // appends physically at the end — so every selectClause above must
         // project columns in the table's true physical order: session_id,
-        // customer_id, created_at, premise_id (see 02_focus_set_setup.py,
-        // where premise_id is declared last for exactly this reason).
+        // customer_id, created_at, premise_id, grain, subject_key
+        // (see 02_focus_set_setup.py and the ALTER TABLE migration in 02_focus_set_setup.py).
         const stmt = `INSERT INTO ${fq} REPLACE WHERE session_id = '${sid}'\n${selectClause}`;
         await runStatement(host, token, warehouseId, stmt);
 
-        const summary = await computeSummary(host, token, warehouseId, catalog, sid);
-        res.json(summary);
+        // Return a lightweight ack so the client can bump focusVersion and
+        // start the map/cells/points refreshes immediately. The summary count
+        // is fetched in parallel via GET /api/focus/summary.
+        res.json({ active: true });
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         console.error("[focus/set] error:", msg);
@@ -284,37 +338,40 @@ async function resolveCtx(req: Request, res: Response): Promise<FocusCtx | null>
   return { host, token, warehouseId, catalog };
 }
 
-interface FocusSummary {
-  active: boolean;
-  // Service-location grain (entity-grain §4.4 default unit — matches the map's
-  // dots and the FocusPanel headline in geniePlugin's fetchGroupAnalytics) is
-  // the PRIMARY count; a raw COUNT(DISTINCT customer_id) here would disagree
-  // with that headline for any multi-site cohort.
-  cohortLocations: number;
-  territoryLocations: number;
-  // Customer grain, exposed alongside so a cohort that collapses many sites to
-  // few distinct owners/chains is still visible, without silently swapping units.
-  cohortCustomers: number;
-  territoryCustomers: number;
-  extent: { south: number; north: number; west: number; east: number } | null;
+// Reinterpret the current cohort's customer set at a new grain. Returns a new
+// selectClause. Exported as a named insertion point for the grain-change route
+// (not yet called by any route — next deliverable adds the UI trigger).
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+export function reinterpretCohortAtGrain(
+  _existingCustomerIds: string[],
+  _newGrain: string,
+  _catalog: string,
+  _schema: string,
+  _sid: string,
+): string {
+  // "account" expands to one row per account under those customer_ids;
+  // "premise" expands to one row per current premise.
+  throw new Error("reinterpretCohortAtGrain not yet implemented");
 }
 
-// Cohort/territory counts at both service-location and customer grain, and the
-// cohort's lat/lon bounding box — in one cross-joined single-row query.
+// Cohort/territory counts at both service-location and customer grain, the
+// cohort's lat/lon bounding box, and the grain/subject_key stored with the
+// most recent focus-set write — in one cross-joined single-row query.
 async function computeSummary(
   host: string,
   token: string,
   warehouseId: string,
   catalog: string,
   sid: string,
-): Promise<FocusSummary> {
+): Promise<GrainedFocusSummary> {
   const c = `${catalog}.${schema}`;
   const fq = `${catalog}.${schema}.app_${FOCUS_TABLE}`;
   const sql = `
     SELECT
       coh.cohort_locations, coh.cohort_customers,
       terr.territory_locations, terr.territory_customers,
-      ext.min_lat, ext.max_lat, ext.min_lon, ext.max_lon
+      ext.min_lat, ext.max_lat, ext.min_lon, ext.max_lon,
+      meta.grain, meta.subject_key
     FROM
       -- Count the cohort over the SAME universe as the territory denominator and
       -- the rail/map: current premises (is_current), not raw focus_set rows —
@@ -323,7 +380,7 @@ async function computeSummary(
       -- the numerator exceed the territory total (e.g. "55,028 of 50,393").
       -- cohort_locations is the PRIMARY count (service-location grain, matches
       -- the rail's headline count exactly); cohort_customers is the same
-      -- cohort collapsed to distinct parties (entity-grain §4.4).
+      -- cohort collapsed to distinct parties.
       (SELECT COUNT(DISTINCT b.premise_id)  AS cohort_locations,
               COUNT(DISTINCT fs.customer_id) AS cohort_customers
          FROM ${fq} fs
@@ -345,15 +402,22 @@ async function computeSummary(
          JOIN ${c}.bridge_account_premise b ON b.customer_id = f.customer_id AND b.is_current
            AND (f.premise_id IS NULL OR f.premise_id = b.premise_id)
          JOIN ${c}.dim_premise_h3 h3 ON h3.premise_id = b.premise_id
-         WHERE f.session_id = '${sid}') ext`;
+         WHERE f.session_id = '${sid}') ext,
+      -- Most recent grain/subject_key written for this session (null for legacy rows).
+      (SELECT grain, subject_key
+         FROM ${fq}
+         WHERE session_id = '${sid}'
+         ORDER BY created_at DESC
+         LIMIT 1) meta`;
   const rows = await runStatement(host, token, warehouseId, sql);
   const r = rows[0] ?? {};
   const cohortLocations = Number(r.cohort_locations) || 0;
-  const num = (v: unknown) => (v == null || !Number.isFinite(Number(v)) ? null : Number(v));
-  const s = num(r.min_lat), n = num(r.max_lat), w = num(r.min_lon), e = num(r.max_lon);
+  const toNum = (v: unknown) => (v == null || !Number.isFinite(Number(v)) ? null : Number(v));
+  const s = toNum(r.min_lat), n = toNum(r.max_lat), w = toNum(r.min_lon), e = toNum(r.max_lon);
   const extent = s != null && n != null && w != null && e != null
     ? { south: s, north: n, west: w, east: e }
     : null;
+  const grainVal = isValidGrain(r.grain) ? r.grain : null;
   return {
     active: cohortLocations > 0,
     cohortLocations,
@@ -361,6 +425,8 @@ async function computeSummary(
     cohortCustomers: Number(r.cohort_customers) || 0,
     territoryCustomers: Number(r.territory_customers) || 0,
     extent,
+    grain: grainVal,
+    subjectKey: (typeof r.subject_key === "string" && r.subject_key) ? r.subject_key : null,
   };
 }
 

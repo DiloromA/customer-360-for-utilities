@@ -3,7 +3,7 @@
 --
 -- Customer counts are the CURRENT customer base: one row per occupied premise
 -- via bridge_account_premise (is_current) → dim_customer. Anchoring here (rather
--- than COUNT(*) dim_customer) excludes prior-occupant and chain-parent rows that
+-- than COUNT(*) dim_customer) excludes prior-customer and chain-parent rows that
 -- now live in the profile dimension, so the denominator is today's customers.
 
 WITH customers AS (

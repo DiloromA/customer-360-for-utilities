@@ -4,9 +4,9 @@
 -- because the appkit-ui analytics plugin returns SQL ARRAY<STRUCT>
 -- columns as JSON strings, not parsed arrays.
 --
--- Customers (cell + territory baseline) are the current occupant per premise
+-- Customers (cell + territory baseline) are the current customer per premise
 -- (bridge_account_premise where is_current → dim_customer), so the denominators
--- count today's customers, not historical/prior-occupant rows.
+-- count today's customers, not historical/prior-customer rows.
 --
 -- The h3_index is passed as the BIGINT-converted-to-string form
 -- (h3_h3tostring). We convert back with h3_stringtoh3 for the join.

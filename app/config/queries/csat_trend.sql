@@ -3,7 +3,7 @@
 -- demo history window, so the default view window is that full span
 -- rather than a trailing-90d slice.
 --
--- Reads metric_csat (see docs/metric-views-foundation-design.md §8).
+-- Reads metric_csat.
 -- `Customer Class` on metric_csat comes from dim_customer, which matches
 -- dim_account's class for every fact_csr_interactions row, so the segment
 -- filter is unaffected. Filters on `Interaction Month` (month-truncated),

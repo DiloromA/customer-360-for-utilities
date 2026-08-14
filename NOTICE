@@ -1,0 +1,71 @@
+# NOTICE
+
+Copyright (2026) Databricks, Inc.
+
+This Software includes software developed at Databricks (https://www.databricks.com/)
+and its use is subject to the included LICENSE file.
+
+By using this repository and the notebooks within, you consent to Databricks'
+collection and use of usage and tracking information in accordance with our
+privacy policy at https://www.databricks.com/legal/privacynotice.
+
+---
+
+Dependencies are grouped below by license. The full text of each license is
+available via the link in the section header.
+
+## MIT License
+
+This Software contains code from the following open source projects, licensed
+under the [MIT License](https://opensource.org/licenses/MIT).
+
+- **react** — https://github.com/facebook/react — Copyright (c) Meta Platforms, Inc. and affiliates.
+- **react-dom** — https://github.com/facebook/react — Copyright (c) Meta Platforms, Inc. and affiliates.
+- **@deck.gl/core** — https://github.com/visgl/deck.gl — Copyright Vis.gl contributors.
+- **@deck.gl/layers** — https://github.com/visgl/deck.gl — Copyright Vis.gl contributors.
+- **@deck.gl/geo-layers** — https://github.com/visgl/deck.gl — Copyright Vis.gl contributors.
+- **@deck.gl/mapbox** — https://github.com/visgl/deck.gl — Copyright Vis.gl contributors.
+- **@deck.gl/extensions** — https://github.com/visgl/deck.gl — Copyright Vis.gl contributors.
+- **@deck.gl/aggregation-layers** — https://github.com/visgl/deck.gl — Copyright Vis.gl contributors.
+- **react-map-gl** — https://github.com/visgl/react-map-gl — Copyright Vis.gl contributors. This contains code from MapboxGL-js. Copyright (c) 2014, Mapbox.
+- **@xyflow/react** — https://github.com/xyflow/xyflow — Copyright (c) 2019-2025 webkid GmbH
+- **@dagrejs/dagre** — https://github.com/dagrejs/dagre — Copyright (c) 2012-2014 Chris Pettitt
+- **recharts** — https://github.com/recharts/recharts — Copyright (c) 2015-present recharts
+- **react-markdown** — https://github.com/remarkjs/react-markdown — Copyright (c) Espen Hovlandsdal
+- **remark-gfm** — https://github.com/remarkjs/remark-gfm — Copyright (c) Titus Wormer <tituswormer@gmail.com>
+- **vite** — https://github.com/vitejs/vite — Copyright (c) 2019-present, VoidZero Inc. and Vite contributors
+- **@vitejs/plugin-react** — https://github.com/vitejs/vite-plugin-react — Copyright (c) 2019-present, Yuxi (Evan) You and Vite contributors
+- **tsx** — https://github.com/privatenumber/tsx — Hiroki Osame <hiroki.osame@gmail.com>
+- **tsdown** — https://github.com/rolldown/tsdown — Copyright (c) 2025-present VoidZero Inc. & Contributors; Copyright (c) 2024 Kevin Deng (https://github.com/sxzz)
+- **pyogrio** — https://github.com/geopandas/pyogrio — Copyright (c) 2020-2024 Brendan C. Ward and pyogrio contributors
+
+## Apache License 2.0
+
+This Software contains code from the following open source projects, licensed
+under the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0).
+
+- **h3-js** — https://github.com/uber/h3-js — Copyright 2018, 2022 Uber Technologies, Inc.
+- **pyarrow** — https://github.com/apache/arrow — Apache Arrow Copyright 2016-2026 The Apache Software Foundation
+- **boto3** — https://github.com/boto/boto3 — Copyright 2014 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+- **requests** — https://github.com/psf/requests — Copyright (c) 2012 by Kenneth Reitz.
+- **xgboost** — https://github.com/dmlc/xgboost — Contributors, 2021.
+- **mlflow** — https://github.com/mlflow/mlflow — Copyright 2018 Databricks, Inc. All rights reserved.
+- **typescript** — https://github.com/microsoft/TypeScript — Typescript Authors.
+
+## BSD 3-Clause License
+
+This Software contains code from the following open source projects, licensed
+under the [BSD 3-Clause License](https://opensource.org/license/bsd-3-clause).
+
+- **maplibre-gl** — https://github.com/maplibre/maplibre-gl-js — Copyright (c) 2023, MapLibre contributors
+- **pandas** — https://github.com/pandas-dev/pandas — Copyright (c) 2008-2011, AQR Capital Management, LLC, Lambda Foundry, Inc. and PyData Development Team; Copyright (c) 2011-2026, Open source contributors.
+- **numpy** — https://github.com/numpy/numpy — Copyright (c) 2005-2025, NumPy Developers.
+- **scikit-learn** — https://github.com/scikit-learn/scikit-learn — Copyright (c) 2007-2026 The scikit-learn developers.
+
+## ISC License
+
+This Software contains code from the following open source projects, licensed
+under the [ISC License](https://opensource.org/licenses/ISC).
+
+- **lucide-react** — https://github.com/lucide-icons/lucide — Copyright (c) 2026 Lucide Icons and Contributors
+- **yaml** — https://github.com/eemeli/yaml — Copyright Eemeli Aro <eemeli@gmail.com>

@@ -1,6 +1,6 @@
 -- Owner portfolio roster — one row per owned premise, for the Owner
--- inspector's roster table + "light up portfolio" map action
--- (entity-grain-design.md §6.2). occupancy_type is the CURRENT occupancy at
+-- inspector's roster table + "light up portfolio" map action.
+-- tenancy_type is the CURRENT tenancy at
 -- that premise ('vacant' when there is no current bridge_account_premise
 -- link — not expected today, since only the landlord-hero's one historical
 -- gap is closed/non-current, but kept general). avg_monthly_kwh is this
@@ -20,13 +20,13 @@ portfolio AS (
   WHERE bpo.is_current
 ),
 cur_link AS (
-  SELECT b.premise_id, b.account_id, b.customer_id, b.occupancy_type, b.link_start_date
+  SELECT b.premise_id, b.account_id, b.customer_id, b.tenancy_type, b.link_start_date
   FROM {{catalog}}.{{schema}}.bridge_account_premise b
   JOIN portfolio p ON p.premise_id = b.premise_id
   WHERE b.is_current
 ),
 -- One row per premise for address display. A large sub-metered commercial
--- premise (temporal-realism §5.3) has 2-5 dim_service_point rows sharing the
+-- premise has 2-5 dim_service_point rows sharing the
 -- same address, so a naive join would duplicate this roster row — any one
 -- sibling is a fine representative since the address fields are identical
 -- across siblings.
@@ -37,7 +37,7 @@ primary_sp AS (
 ),
 kwh AS (
   -- Sum across sibling service_points per month first — a sub-metered
-  -- premise bills one fact_customer_billing row PER usage_point, so AVG over
+  -- premise bills one fact_customer_billing row PER service point, so AVG over
   -- the raw rows would average per-METER kwh, not the site's true monthly
   -- total.
   SELECT premise_id, AVG(month_total_kwh) AS avg_monthly_kwh
@@ -63,7 +63,7 @@ SELECT
   h3.longitude,
   a.account_number                                   AS tenant_account_number,
   c.customer_number                                  AS tenant_customer_number,
-  COALESCE(cl.occupancy_type, 'vacant')               AS occupancy_type,
+  COALESCE(cl.tenancy_type, 'vacant')               AS tenancy_type,
   cl.link_start_date                                  AS tenant_since,
   k.avg_monthly_kwh
 FROM portfolio p

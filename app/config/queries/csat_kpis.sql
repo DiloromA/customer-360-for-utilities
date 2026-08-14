@@ -1,8 +1,7 @@
 -- CSAT view — Row 1 KPI band. One row: headline CSAT (top-2-box + mean),
 -- NPS, FCR, AHT, each with its ref_cx_targets target for the delta chip.
 --
--- Reads metric_csat / metric_nps / metric_fcr (see
--- docs/metric-views-foundation-design.md §8). CSAT/FCR/AHT source
+-- Reads metric_csat / metric_nps / metric_fcr. CSAT/FCR/AHT source
 -- fact_csr_interactions.csat_score_1_5 directly (complete series, not a
 -- ~10% survey sample); NPS comes from fact_survey_responses. metric_nps
 -- joins dim_customer (not dim_account) by customer_id, which is already

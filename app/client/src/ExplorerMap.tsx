@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback, useRef, useEffect, Component, type ReactNode, type DependencyList } from "react";
+import { useState, useMemo, useCallback, useRef, useEffect, Component, type ReactNode } from "react";
 import Map, {
   Source,
   Layer,
@@ -11,15 +11,16 @@ import Map, {
 import "maplibre-gl/dist/maplibre-gl.css";
 import { cellToBoundary } from "h3-js";
 import { ScatterplotLayer, PolygonLayer } from "@deck.gl/layers";
-import { useAnalyticsQuery } from "@databricks/appkit-ui/react";
+import { useC360Query } from "./queryUtils";
 import { sql } from "@databricks/appkit-ui/js";
+import { rows } from "./queryUtils";
 import { LineChart, Line, ResponsiveContainer } from "recharts";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { DeckOverlay } from "./DeckOverlay";
 import { formatUnitCount, unitLabel, type CountUnit } from "./units";
-import { PremiseDrillCard, PivotChips, shortId, type InspectorSubject } from "./PremiseInspector";
-import { OwnerDrillCard } from "./OwnerInspector";
+import { PremiseDrillCard, shortId, type InspectorSubject } from "./PremiseInspector";
+import type { Grain } from "./subject";
 import {
   CUSTOMER_CLASS_OPTIONS,
   USAGE_BAND_OPTIONS,
@@ -64,51 +65,14 @@ import {
   type LayerSpec,
   type RGB,
 } from "./mapConstants";
+import type { CellRow, ProgramCellRow, ActiveOutageCellRow, ActiveOutagePointRow, PointRow, Bounds, FocusSummary } from "./mapTypes";
+import { useViewportFetch, perfMark, perfMeasure } from "./hooks/useViewportFetch";
+import { padBounds, boundsContain, initialBoundsFromView, VIEWPORT_PAD, pointInPolygon, polygonsIntersect } from "./mapGeometry";
+import { CustomerDrillPanel } from "./rail/CustomerDrillPanel";
 
 // ────────────────────────────────────────────────────────────────────
-// Types
+// Types (shared types imported from mapTypes.ts; local-only types below)
 // ────────────────────────────────────────────────────────────────────
-
-type CellRow = {
-  h3_index: string;
-  n_customers: number;
-  n_residential: number;
-  n_commercial: number;
-  n_payment_stressed: number;
-  pct_payment_stressed: number;
-  n_churn_high: number;
-  pct_churn_high: number;
-  n_critical_care: number;
-  pct_critical_care: number;
-  n_liheap: number;
-  pct_liheap: number;
-  n_engagement_high: number;
-  pct_engagement_high: number;
-  n_high_usage: number;
-  pct_high_usage: number;
-  avg_digital_adoption: number;
-  sum_outage_minutes_90d: number;
-  avg_outage_min_per_customer_90d: number;
-  sum_complaints_90d: number;
-  complaints_per_1k_90d: number;
-  dominant_theme: string;
-  n_enrolled_any_program: number;
-  pct_enrolled_any_program: number;
-  centroid_lat: number;
-  centroid_lon: number;
-}
-
-type ProgramCellRow = {
-  h3_index: string;
-  n_customers: number;
-  n_eligible: number;
-  n_enrolled: number;
-  n_not_enrolled_eligible: number;
-  pct_enrolled: number | null;
-  pct_gap: number | null;
-  centroid_lat: number;
-  centroid_lon: number;
-}
 
 interface ProgramRow {
   program_id: string;
@@ -118,31 +82,6 @@ interface ProgramRow {
   rebate_amount_usd: number;
   avg_annual_kwh_saved: number;
   n_enrolled: number;
-}
-
-// Active outages (live) layer rows.
-type ActiveOutageCellRow = {
-  h3_index: string;
-  n_customers: number;
-  n_currently_out: number;
-  pct_currently_out: number;
-}
-
-interface ActiveOutagePointRow {
-  account_number: string;
-  premise_number: string;
-  latitude: number;
-  longitude: number;
-  customer_class: string;
-  critical_care_flag: boolean;
-  priority_restoration_flag: boolean;
-  out_since: string;
-  estimated_restoration_at: string;
-  minutes_out_so_far: number;
-  cause_code: string;
-  weather_category: string;
-  crew_status: string;
-  active_outage_id: string;
 }
 
 interface ActiveOutageIncidentRow {
@@ -162,64 +101,6 @@ interface ActiveOutageIncidentRow {
   is_major_event_day: boolean;
 }
 
-interface PointRow {
-  // Identity = the human account_number (deep-link key). The server also carries
-  // customer_id internally for Genie matching, but the client keys on account.
-  account_number: string;
-  // Present on Genie-matched rows (POINT_COLS always selects it server-side) —
-  // used client-side to collapse premise-grain rows back to distinct customers
-  // for the "Ask the map" answer copy (ask-the-map-count-grain-design.md).
-  customer_id?: string;
-  // The premise's human natural key (dim_premise.premise_number) — a dot
-  // click resolves to the Premise inspector by default (entity-grain §6.3),
-  // so every dot needs this alongside account_number. STRING like
-  // account_number, not the raw BIGINT premise_id, for the same reason
-  // (see premise_header.sql's note on the client/BIGINT boundary).
-  premise_number: string;
-  latitude: number;
-  longitude: number;
-  customer_class: string;
-  usage_band: string;
-  engagement_tier: string;
-  payment_stressed_flag: boolean;
-  high_user_flag: boolean;
-  churn_risk_band: string;
-  critical_care_flag: boolean;
-  liheap_eligible: boolean;
-  recent_complaint_count_90d: number;
-  recent_outage_minutes_90d: number;
-  digital_adoption_score: number;
-  // Predicted 30-day complaint risk (ml_complaint_predictor, latest cycle).
-  // Null when the customer has no score row (LEFT JOIN on the server).
-  complaint_risk_pct: number | null;
-  complaint_risk_tier: string | null;
-  complaint_risk_category: string | null;
-  attention_score: number;
-  // Present only when a program layer is active (the /points request carries a
-  // program_id). is_enrolled = adopted the selected program; has_der = has the
-  // DER device the program targets (the AMI/DER "detected" signal).
-  is_enrolled?: boolean;
-  has_der?: boolean;
-  // Present only when a focus cohort is active (the /points request carries a
-  // sessionId). true = this customer is in the session's focus set.
-  in_focus?: boolean;
-}
-
-interface Bounds { south: number; north: number; west: number; east: number; }
-
-// The active focus cohort, as reported by /api/focus/{set,summary}. `extent` is
-// the cohort's lat/lon bounding box (null when empty) — used to frame-to-fit.
-interface FocusSummary {
-  active: boolean;
-  // Service-location grain — the default counting unit (entity-grain §4.4),
-  // matches the FocusPanel headline and the map's dot count.
-  cohortLocations: number;
-  territoryLocations: number;
-  // Same cohort collapsed to distinct parties.
-  cohortCustomers: number;
-  territoryCustomers: number;
-  extent: Bounds | null;
-}
 interface TerritoryRow { min_lat: number; max_lat: number; min_lon: number; max_lon: number; }
 
 
@@ -258,23 +139,7 @@ interface GenieTurn {
 // Helpers
 // ────────────────────────────────────────────────────────────────────
 
-// Grow a bbox by `factor` × its own span on each side, so the fetched area
-// covers a margin beyond the visible viewport (buffered viewport fetch).
-function padBounds(b: Bounds, factor: number): Bounds {
-  const padLat = (b.north - b.south) * factor;
-  const padLon = (b.east - b.west) * factor;
-  return {
-    south: b.south - padLat, north: b.north + padLat,
-    west:  b.west  - padLon, east:  b.east  + padLon,
-  };
-}
-
-// True when `inner` fits entirely inside `outer` — used to skip a refetch
-// when the new viewport is still covered by the last padded bbox we loaded.
-function boundsContain(outer: Bounds, inner: Bounds): boolean {
-  return inner.south >= outer.south && inner.north <= outer.north
-    && inner.west >= outer.west && inner.east <= outer.east;
-}
+// padBounds, boundsContain imported from ./mapGeometry
 
 function h3ToPolygon(h3Index: string) {
   const boundary = cellToBoundary(h3Index);
@@ -283,29 +148,16 @@ function h3ToPolygon(h3Index: string) {
   return { type: "Polygon" as const, coordinates: [ring] };
 }
 
-// Ray-casting point-in-polygon. `ring` is [[lng,lat], …] (open or closed).
-// Used by the lasso/box selection to find customers inside a drawn shape.
-function pointInPolygon(lng: number, lat: number, ring: [number, number][]): boolean {
-  let inside = false;
-  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
-    const xi = ring[i][0], yi = ring[i][1];
-    const xj = ring[j][0], yj = ring[j][1];
-    const intersect = (yi > lat) !== (yj > lat)
-      && lng < ((xj - xi) * (lat - yi)) / ((yj - yi) || 1e-12) + xi;
-    if (intersect) inside = !inside;
-  }
-  return inside;
-}
 
 function num(n: number | string | null | undefined): number {
   if (n == null) return 0;
   const v = typeof n === "string" ? Number(n) : n;
   return Number.isFinite(v) ? v : 0;
 }
-// useAnalyticsQuery (config/queries/*.sql results) returns BOOLEAN columns as
+// useC360Query (config/queries/*.sql results) returns BOOLEAN columns as
 // the literal strings "true"/"false", not real JS booleans — "false" is a
 // truthy non-empty string, so a bare truthy check is always true. Every
-// BOOLEAN column sourced from useAnalyticsQuery MUST go through bool() before
+// BOOLEAN column sourced from useC360Query MUST go through bool() before
 // a truthy check. (Booleans fed by the /api/genie/* fetch endpoints are
 // already coerced server-side in dbx.ts and don't need this.)
 function bool(b: boolean | string | null | undefined): boolean {
@@ -347,6 +199,29 @@ function cellsToGeoJSON(rows: ReadonlyArray<Record<string, unknown>> | null | un
   };
 }
 
+// Cohort definer passed to writeFocus — mirrors the server's accepted body shapes.
+// grain is sent for hex/hexes commits to drive the grain-following spread.
+type FocusDef = {
+  sql?: string;
+  filters?: { customerClasses?: string; usageBands?: string; engagementTiers?: string; issueFlags?: string };
+  hex?: { cellId: string; resolution: number };
+  hexes?: string[];
+  hexRes?: number;
+  premiseNumbers?: string[];
+  accountNumbers?: string[];
+  grain?: string;
+};
+
+// One-level undo snapshot captured at each writeFocus call so clearFocus can
+// offer a "Focus cleared · Undo" toast that replays the last cohort.
+type FocusSnapshot = {
+  def: FocusDef;
+  label: string;
+  provisional?: number;
+  selectionPoly: [number, number][] | null;
+  selectedCell: string | null;
+};
+
 // Minimum customer count for a cell to get its metric color. Set to 1 so
 // every cell the data produces is painted — `exec_map_cells` only emits cells
 // with at least one customer, so this colors them all. The population is a
@@ -355,9 +230,6 @@ function cellsToGeoJSON(rows: ReadonlyArray<Record<string, unknown>> | null | un
 // choropleth densify continuously across the whole slider range.
 const MIN_CUSTOMERS_FOR_COLOR = 1;
 
-// Buffered viewport fetch: grow the fetched bbox this much beyond the visible
-// viewport on each side, so small pans are covered by data already on hand.
-const VIEWPORT_PAD = 0.4;
 
 // "Complaint volume" can be focused on one complaint sub-category via a Theme
 // sub-dropdown. Values are fact_customer_complaints.sub_category; grouped by
@@ -463,19 +335,7 @@ function fmtKwh(n: number | string | null | undefined): string {
   return `${Math.round(v).toLocaleString()} kWh`;
 }
 
-function fmtUSD(n: number | string | null | undefined): string {
-  if (n == null) return "—";
-  const v = typeof n === "string" ? Number(n) : n;
-  if (!Number.isFinite(v)) return "—";
-  return `$${v.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
-}
 
-function fmtDate(s: string | null | undefined): string {
-  if (!s) return "—";
-  const d = new Date(s);
-  if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
-}
 
 // Compact duration for outage ETAs / time-out, e.g. "2h 15m" or "45m".
 function fmtDuration(mins: number | string | null | undefined): string {
@@ -485,55 +345,19 @@ function fmtDuration(mins: number | string | null | undefined): string {
   return h > 0 ? `${h}h ${r}m` : `${r}m`;
 }
 
-// ────────────────────────────────────────────────────────────────────
-// Warehouse-direct viewport fetch
-// ────────────────────────────────────────────────────────────────────
-//
-// The map's cell/point layers load from the custom /api/genie/* POST routes
-// (which hit the SQL warehouse directly, bypassing AppKit's ~1 MB SSE cap).
-// Every one of those effects was the same shape: bump a request-sequence ref,
-// POST a body, and on response DROP it if a newer request has since superseded
-// this one — the reqSeq stale-guard, so a slow earlier response can't clobber a
-// faster later one during rapid pan/zoom. This hook is that machinery once.
-//
-// `body` and `onData` are captured from the render whose `deps` changed (they
-// are intentionally NOT in the dep array), so any value they read — e.g. the
-// H3 `resolution` a cache stores alongside its rows — is snapshotted at DISPATCH
-// time, not response time. That preserves the old per-effect `capturedRes`.
-function useViewportFetch<T>(config: {
-  route: string;                         // POST endpoint
-  tag: string;                           // console-error prefix, e.g. "cells"
-  active: boolean;                       // gate — no fetch unless true
-  responseKey: string;                   // the array field on the JSON response
-  body: () => Record<string, unknown>;   // request body, recomputed per fire
-  onData: (rows: T[]) => void;           // receives data[responseKey]
-  onMeta?: (data: Record<string, unknown>) => void; // receives the full response, for routes that carry extra fields (e.g. total/sampled) alongside the array
-  setLoading?: (loading: boolean) => void;
-  deps: DependencyList;                  // effect deps (include `active`)
-}) {
-  const reqSeq = useRef(0);
+// Generic debounce hook. Returns a value that only updates after `delay` ms of
+// stability. Used to batch rapid filter-chip toggles into a single warehouse
+// request while keeping map navigation (bounds/zoom) changes immediate.
+function useDebounce<T>(value: T, delay: number): T {
+  const [debounced, setDebounced] = useState<T>(value);
   useEffect(() => {
-    if (!config.active) return;
-    const seq = ++reqSeq.current;
-    config.setLoading?.(true);
-    fetch(config.route, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(config.body()),
-    })
-      .then((r) => r.json())
-      .then((data) => {
-        if (seq !== reqSeq.current) return; // a newer request superseded this
-        if (Array.isArray(data[config.responseKey])) {
-          config.onData(data[config.responseKey] as T[]);
-          config.onMeta?.(data);
-        }
-        else if (data.error) console.error(`[${config.tag}] ` + data.error);
-      })
-      .catch((e) => { if (seq === reqSeq.current) console.error(`[${config.tag}]`, e); })
-      .finally(() => { if (seq === reqSeq.current) config.setLoading?.(false); });
-  }, config.deps); // eslint-disable-line react-hooks/exhaustive-deps
+    const id = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(id);
+  }, [value, delay]); // eslint-disable-line react-hooks/exhaustive-deps
+  return debounced;
 }
+
+// useViewportFetch is imported from ./hooks/useViewportFetch
 
 // ────────────────────────────────────────────────────────────────────
 // ExplorerMap — the Explorer geographic command center
@@ -572,6 +396,10 @@ export interface MapFocusRequest {
   // Optional: omitted by the Owner inspector's "light up portfolio" action,
   // which has many sites and no single account to open a drill for.
   account?: string;
+  // Set by the profile drawer's location switcher: sync the map to a specific
+  // premise — fly to it and ring it — WITHOUT dropping the current cohort/genie
+  // context (a lighter path than the search/show-all-locations reframe).
+  premiseNumber?: string;
   lat: number;
   lon: number;
   ts: number;
@@ -596,6 +424,15 @@ function useGroupAnalytics(
   // newer than what we've loaded means a refresh is in flight.
   const [loadedVersion, setLoadedVersion] = useState(-1);
   useEffect(() => {
+    // Don't refetch while a cohort commit is mid-flight (focusPending). The
+    // optimistic focusActive flip fires this effect BEFORE /api/focus/set has
+    // written the cohort into app_focus_set, so a cohort-body query would read
+    // an EMPTY cohort and land total:0 — flashing the rail 995 → 0 → real.
+    // focusPending clears right after the /set ack bumps focusVersion, so the
+    // fetch that actually runs reads the committed cohort; meanwhile the rail
+    // holds the prior numbers through the spinner (useGroupAnalytics keeps the
+    // last `data`), then reveals the real count on one frame.
+    if (focusPending) return;
     let cancelled = false;
     // With no cohort active, still carry any live attribute filters so the
     // rail agrees with the filtered-but-no-cohort map (Issue 1 desync) —
@@ -611,7 +448,7 @@ function useGroupAnalytics(
       .catch((e) => { if (!cancelled) console.error("[focus/analytics]", e); })
       .finally(() => { if (!cancelled) setLoadedVersion(focusVersion); });
     return () => { cancelled = true; };
-  }, [sessionId, focusActive, focusVersion, filters]);
+  }, [sessionId, focusActive, focusVersion, focusPending, filters]);
   // Loading spans BOTH phases of a cohort change: focus/set in flight
   // (focusPending), then this re-query (focusVersion ahead of what we've loaded).
   // Deriving it closes the one-frame gap at the hand-off where the spinner
@@ -631,6 +468,13 @@ export function ExplorerMap(props: {
   return <MapErrorBoundary><ExplorerMapInner {...props} /></MapErrorBoundary>;
 }
 
+// Compute an approximate initial bounding box from the INITIAL_VIEW camera so
+// the first warehouse request can be dispatched before the basemap style finishes
+// loading. At zoom 8, one screen is roughly 3°×2° depending on container size.
+// Using the padded viewport convention (VIEWPORT_PAD = 0.4) gives a generous
+// query area that covers the territory without being too large.
+// initialBoundsFromView imported from ./mapGeometry
+
 function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
   onJumpToSubject: (subject: InspectorSubject) => void;
   focus?: MapFocusRequest | null;
@@ -643,7 +487,10 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
   // is a native MapLibre zoom expression, so it needs no React state at all.
   const [zoom, setZoom] = useState(INITIAL_VIEW.zoom);
   const [liveZoom, setLiveZoom] = useState(INITIAL_VIEW.zoom);
-  const [bounds, setBounds] = useState<Bounds | null>(null);
+  // Seeded from the known INITIAL_VIEW camera so the first warehouse request
+  // dispatches immediately — basemap style load no longer gates the query.
+  // onLoad (and onMoveEnd) update bounds with the real MapLibre bbox once ready.
+  const [bounds, setBounds] = useState<Bounds>(() => initialBoundsFromView());
   const [layerId, setLayerId] = useState<string>("complaints_per_1k");
   // "" = all complaints; else a fact_customer_complaints.sub_category that
   // focuses the Complaint-volume layer on one theme.
@@ -659,31 +506,47 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
   // customer list. Opens the inline drill-down panel — the executive stays in
   // the map context instead of bouncing to a separate customer workspace.
   // A literal map-dot click resolves to the Premise inspector by default
-  // (the map's atom is the premise, not the customer — entity-grain §6.3);
+  // (the map's atom is the premise, not the customer);
   // list-row clicks (a customer picked by name, not by location) still
   // resolve straight to the Customer inspector via selectCustomer below.
   const [drillSubject, setDrillSubject] = useState<InspectorSubject | null>(null);
-  const selectPremise = useCallback((premiseNumber: string) => setDrillSubject({ kind: "premise", premiseNumber }), []);
-  const selectCustomer = useCallback((accountNumber: string) => setDrillSubject({ kind: "customer", accountNumber }), []);
-  const selectOwner = useCallback((ownerNumber: string) => setDrillSubject({ kind: "owner", ownerNumber }), []);
-  const closeDrill = useCallback(() => setDrillSubject(null), []);
-  // True when `d` (a map point carrying account_number + premise_number) is
-  // the drilled subject, whichever kind it is — the single place the two
-  // client-side identities (STRING account_number / STRING premise_number)
-  // get compared against the current drill subject.
-  const isDrillMatch = useCallback((d: { account_number: string; premise_number?: string }): boolean => {
-    if (!drillSubject) return false;
-    if (drillSubject.kind === "premise") return d.premise_number === drillSubject.premiseNumber;
-    // An owner is a portfolio (many premises) — no single dot represents it.
-    if (drillSubject.kind === "owner") return false;
-    return d.account_number === drillSubject.accountNumber;
-  }, [drillSubject]);
+  // The full identity triple of whatever was drilled into — the source of truth
+  // for (a) re-scoping when the grain toggle flips with a drill already open,
+  // and (b) lighting EVERY premise of a multi-site customer (match on
+  // customer_id, the only key that spans a customer's separate per-site
+  // accounts). A map-dot click knows all three; a list-row select fills only
+  // its own key (the rest resolve from loaded points as needed).
+  type DrillAnchor = { accountNumber: string | null; premiseNumber: string | null; customerId: string | null };
+  const [drillAnchor, setDrillAnchor] = useState<DrillAnchor | null>(null);
+  const selectPremise = useCallback((premiseNumber: string) => {
+    setDrillSubject({ kind: "premise", premiseNumber });
+    setDrillAnchor({ accountNumber: null, premiseNumber, customerId: null });
+  }, []);
+  const selectCustomer = useCallback((accountNumber: string) => {
+    setDrillSubject({ kind: "customer", accountNumber });
+    setDrillAnchor({ accountNumber, premiseNumber: null, customerId: null });
+  }, []);
+  // Map-dot click: the point carries the full identity, so record it — this is
+  // what makes a subsequent grain flip re-scope correctly and lets a customer
+  // drill light all of that customer's loaded premises.
+  const selectFromPoint = useCallback(
+    (o: { account_number: string; premise_number: string; customer_id?: string }, g: Grain) => {
+      setDrillAnchor({ accountNumber: o.account_number, premiseNumber: o.premise_number, customerId: o.customer_id ?? null });
+      setDrillSubject(g === "premise"
+        ? { kind: "premise", premiseNumber: o.premise_number }
+        : { kind: "customer", accountNumber: o.account_number });
+    }, []);
+  const closeDrill = useCallback(() => { setDrillSubject(null); setDrillAnchor(null); }, []);
   // The map is always the zoom-tiered deck.gl view: a value choropleth (H3
   // hexagons) when zoomed out, refining into clickable customer dots as you
   // zoom in.
   // Customer slice — shared vocabulary with the customer filter rail. Applied
   // server-side (re-aggregates the cells / re-queries the points).
   const [filters, setFilters] = useState<FilterState>(emptyFilterState);
+  // Debounced filters for warehouse queries: rapid filter toggles (e.g. checking
+  // several classes in a row) are batched into one request rather than one per
+  // click. Map navigation (bounds/resolution) changes remain immediate.
+  const debouncedFilters = useDebounce(filters, 200);
   const [focusPanelOpen, setFocusPanelOpen] = useState(false);
   const nActiveFilters = activeFilterCount(filters);
   // Human-readable listing of which dimensions are constrained, for the
@@ -704,6 +567,8 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
   const [drawPts, setDrawPts] = useState<[number, number][]>([]);
   const [selectionPoly, setSelectionPoly] = useState<[number, number][] | null>(null);
   const drawingRef = useRef(false);
+  // Whether the user dismissed the grain-spread note for the current session.
+  const [spreadNoteDismissed, setSpreadNoteDismissed] = useState(false);
 
   // "Ask the map" — a conversational Genie chat scoped to the visible area
   // (+ filters). Each turn is a question and its answer: a text narrative, a
@@ -733,19 +598,34 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
   );
   const sessionId = sessionIdRef.current;
   const [focusSummary, setFocusSummary] = useState<FocusSummary | null>(null);
+  // Which focusVersion the current focusSummary was fetched for. The focus panel
+  // count and frameCohort only use focusSummary when this matches focusVersion,
+  // so an arriving authoritative summary for an already-superseded version is
+  // dropped. -1 = no authoritative summary yet for the current version.
+  const [summaryVersion, setSummaryVersion] = useState(-1);
+  // One-level undo: the inputs that fully reproduce the last committed cohort,
+  // so clearFocus can offer a "Focus cleared · Undo" toast.
+  const currentFocusRef = useRef<FocusSnapshot | null>(null);
+  const [undoSnapshot, setUndoSnapshot] = useState<FocusSnapshot | null>(null);
+  const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // A short human label for how the current focus group was defined (hex / drawn
   // / attributes / words). Shown as the rail header eyebrow. null = territory.
   const [focusLabel, setFocusLabel] = useState<string | null>(null);
   // Bumped whenever the cohort changes, so the points layer re-fetches its
-  // server-computed `in_focus` flags.
+  // server-computed `in_focus` flags. Bumped on the /set ack (not after
+  // computeSummary) so the map/cells/points re-fetches fire immediately, without
+  // waiting for the summary query.
   const [focusVersion, setFocusVersion] = useState(0);
+  const focusVersionRef = useRef(0);
   // True from the instant a cohort change is REQUESTED (box drawn, hex clicked,
   // filters applied) until its /api/focus/set round-trip resolves. The rail keys
   // its loading state off this so the spinner shows immediately — `focusVersion`
-  // only bumps after the (slow) set call returns, which is too late to feel
-  // responsive.
+  // only bumps after the set ack, which is after the write lands.
   const [focusPending, setFocusPending] = useState(false);
   const focusActive = !!focusSummary?.active;
+  // Stable ref to the territory totals from the last authoritative summary.
+  // Read inside writeFocus to avoid a stale focusSummary closure.
+  const territoryRef = useRef({ locations: 0, customers: 0 });
   // Group analytics for the cohort — one source of truth for the headline count,
   // shared by the top context bar and the right-rail panel so both reveal it
   // together (see useGroupAnalytics).
@@ -757,18 +637,53 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
   // returned summary and a label describing how it was chosen.
   const writeFocus = useCallback(
     async (
-      def: {
-        sql?: string;
-        filters?: { customerClasses?: string; usageBands?: string; engagementTiers?: string; issueFlags?: string };
-        hex?: { cellId: string; resolution: number };
-        hexes?: string[];
-        hexRes?: number;
-        accountNumbers?: string[];
-      },
+      def: FocusDef,
       label: string,
+      // Optional client-side approximate count (premises). When provided, a
+      // provisional focusSummary is set immediately so focusActive becomes true
+      // and the map/cells/points re-fetches fire before /set even returns.
+      // The authoritative summary (from /api/focus/summary) replaces it later.
+      provisionalLocations?: number,
     ) => {
+      // Snapshot this cohort for one-level undo. selectedCell is derived
+      // from def.hex (caller already knows it); selectionPoly is read from
+      // closure — in the hexes/box path this effect runs after render so it's
+      // current; in the hex-click path selectionPoly is already null (the caller
+      // clears it synchronously before calling writeFocus, but since state
+      // updates are batched we can't read the new value here — we use null
+      // directly for hex clicks because def.hex is present).
+      currentFocusRef.current = {
+        def,
+        label,
+        provisional: provisionalLocations,
+        selectedCell: def.hex?.cellId ?? null,
+        selectionPoly: def.hex ? null : selectionPoly,
+      };
+      // Invalidate any pending undo toast — a new cohort supersedes it.
+      setUndoSnapshot(null);
+      if (undoTimerRef.current) { clearTimeout(undoTimerRef.current); undoTimerRef.current = null; }
+
       setFocusLabel(label);
       setFocusPending(true);
+
+      // For client-known selections (box/lasso over dots, hex click), make
+      // focusActive true immediately so the map starts recoloring without waiting
+      // for the /set round-trip. The provisional summary has no extent (can't
+      // frame yet); summaryVersion stays behind focusVersion until the
+      // authoritative summary lands, so the focus panel count stays provisional.
+      if (provisionalLocations !== undefined) {
+        setFocusSummary({
+          active: true,
+          cohortLocations: provisionalLocations,
+          cohortCustomers: provisionalLocations,
+          territoryLocations: territoryRef.current.locations,
+          territoryCustomers: territoryRef.current.customers,
+          extent: null,
+          grain: null,
+          subjectKey: null,
+        });
+      }
+
       try {
         const resp = await fetch("/api/focus/set", {
           method: "POST",
@@ -777,22 +692,78 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
         });
         const data = await resp.json();
         if (!resp.ok || data.error) throw new Error(data.error || `Request failed (${resp.status})`);
-        setFocusSummary(data as FocusSummary);
-        setFocusVersion((v) => v + 1);
+
+        // Bump focusVersion on the write ack (not after computeSummary), so
+        // map/cells/points re-fetches fire immediately. The summary is fetched
+        // in parallel below.
+        focusVersionRef.current += 1;
+        const captured = focusVersionRef.current;
+        setFocusVersion(captured);
+        // Set focusActive for non-optimistic paths (sql/filters cohorts) where
+        // we don't have a provisional summary yet.
+        if (provisionalLocations === undefined) {
+          setFocusSummary({ active: true, cohortLocations: 0, cohortCustomers: 0,
+            territoryLocations: territoryRef.current.locations,
+            territoryCustomers: territoryRef.current.customers,
+            extent: null, grain: null, subjectKey: null });
+        }
+        setFocusPending(false);
+
+        // Fetch authoritative summary in parallel with the map re-fetches that
+        // the focusVersion bump just kicked off.
+        fetch(`/api/focus/summary?sessionId=${encodeURIComponent(sessionId)}`)
+          .then((r) => r.json())
+          .then((s: FocusSummary & { error?: string }) => {
+            // Drop if a newer selection already superseded this one.
+            if (focusVersionRef.current !== captured) return;
+            if (!s.error) {
+              territoryRef.current = { locations: s.territoryLocations, customers: s.territoryCustomers };
+              // Reflect the authoritative summary even when it's empty
+              // (active:false → the cohort resolved to zero members, so we fall
+              // back to territory) rather than leaving a stale provisional count.
+              setFocusSummary(s);
+            }
+            // ALWAYS advance summaryVersion — even for an empty cohort or a
+            // summary error. The hex-tier reveal gate (cohortRevealReady) keys on
+            // summaryVersion === focusVersion; if we skipped it for an empty/failed
+            // summary the choropleth would stay blanked and "Updating…" would spin
+            // forever (the "0 premises then stuck" bug).
+            setSummaryVersion(captured);
+          })
+          .catch((e) => {
+            console.error("[focus/summary]", e instanceof Error ? e.message : e);
+            // Don't strand the reveal gate if the summary fetch itself fails.
+            if (focusVersionRef.current === captured) setSummaryVersion(captured);
+          });
       } catch (e) {
         console.error("[focus/set]", e instanceof Error ? e.message : e);
-      } finally {
         setFocusPending(false);
       }
     },
-    [sessionId],
+    // selectionPoly is included so the hexes/box snapshot captures the correct
+    // poly at the time the box-commit useEffect runs (after render).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [sessionId, selectionPoly],
   );
 
   const clearFocus = useCallback(async () => {
+    // Stash the current cohort before wiping it so the undo toast can replay it.
+    if (currentFocusRef.current) {
+      const snap = currentFocusRef.current;
+      setUndoSnapshot(snap);
+      if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+      undoTimerRef.current = setTimeout(() => {
+        setUndoSnapshot(null);
+        undoTimerRef.current = null;
+      }, 7000);
+    }
+    currentFocusRef.current = null;
     setFocusPending(true);
     setFocusSummary(null);
     setFocusLabel(null);
-    setFocusVersion((v) => v + 1);
+    focusVersionRef.current += 1;
+    setFocusVersion(focusVersionRef.current);
+    setSummaryVersion(-1);
     try {
       await fetch("/api/focus/clear", {
         method: "POST",
@@ -805,6 +776,17 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
       setFocusPending(false);
     }
   }, [sessionId]);
+
+  // One-level undo: replay the snapshot captured at the last writeFocus call.
+  const restoreFocus = useCallback(() => {
+    const s = undoSnapshot;
+    if (!s) return;
+    if (undoTimerRef.current) { clearTimeout(undoTimerRef.current); undoTimerRef.current = null; }
+    setUndoSnapshot(null);
+    setSelectionPoly(s.selectionPoly);
+    setSelectedCell(s.selectedCell);
+    writeFocus(s.def, s.label, s.provisional);
+  }, [undoSnapshot, writeFocus]);
 
   // Turn the current attribute filters into the focus cohort (territory-wide,
   // resolved server-side from the same predicate the map uses).
@@ -854,11 +836,14 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
   const [renderMode, setRenderMode] = useState<"auto" | "dots" | "hex">("auto");
   const renderModeLocked = genieActive || !!layer.isLiveOutage;
   const effectiveRenderMode = renderModeLocked ? "auto" : renderMode;
-  // The cohort inspector's counting unit (entity-grain §6.4) — "owner" isn't a
-  // selectable option here; the owner pivot is reached from a Premise drill card.
-  // Sets both the headline's unit and the default subject a rail drill opens
-  // (locations → Premise inspector, customers → Customer inspector).
-  const [focusUnit, setFocusUnit] = useState<CountUnit>("premise");
+  // The master viewing grain — drives the headline count, dot selection
+  // semantics (a click groups by this grain), and which inspector opens by
+  // default. Promoted to the Explorer header so the user declares intent
+  // up-front rather than discovering it mid-drill.
+  const [grain, setGrain] = useState<Grain>("premise");
+  // Remembers the grain active before a snap-to-customer, so returning to a
+  // premise-capable layer can restore it. null = no pending restore.
+  const preSnapGrainRef = useRef<'premise' | 'customer' | null>(null);
   // Dots are meaningful (visible / selectable) once the cross-fade begins.
   // Uses settled `zoom` so toolbars don't flicker mid-gesture.
   const dotsVisible =
@@ -883,13 +868,13 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
   const hexLineOpacity = effectiveRenderMode === "dots" ? 0 : effectiveRenderMode === "hex" ? HEX_LINE_OPACITY_PINNED : HEX_LINE_OPACITY;
 
   // ── Programs list (for the layer's program picker)
-  const programs = useAnalyticsQuery<ProgramRow>("programs_list", {});
+  const programs = useC360Query<ProgramRow>("programs_list", {});
 
   // Default to a program when switching to a program layer.
   useEffect(() => {
-    if (layer.needsProgram && !programId && (programs.data || []).length > 0) {
-      const list = programs.data as ProgramRow[];
-      setProgramId(list[0].program_id);
+    const programList = rows(programs.data);
+    if (layer.needsProgram && !programId && programList.length > 0) {
+      setProgramId(programList[0].program_id);
     }
   }, [layer.needsProgram, programId, programs.data]);
 
@@ -901,6 +886,10 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
   // The custom routes have no such cap. Loading state here; the fetch effects
   // (just after baseCache/programCache below) write results into those caches.
   const [baseCellsLoading, setBaseCellsLoading] = useState(false);
+  const [baseCellsError, setBaseCellsError] = useState<string | null>(null);
+  // Bumping this forces the cells fetch to re-fire (user-triggered Retry after
+  // a terminal error).
+  const [cellsRetrySeq, setCellsRetrySeq] = useState(0);
   const [programCellsLoading, setProgramCellsLoading] = useState(false);
   const programCellsActive = layer.needsProgram && !!programId && !!bounds;
 
@@ -909,19 +898,19 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
   // ride the analytics() SSE path. All only matter while the live layer shows.
   const liveActive = !!layer.isLiveOutage && !!bounds;
   const [activeCellsLoading, setActiveCellsLoading] = useState(false);
-  const incidentsQuery = useAnalyticsQuery<ActiveOutageIncidentRow>(
+  const incidentsQuery = useC360Query<ActiveOutageIncidentRow>(
     "exec_active_outage_incidents", layer.isLiveOutage ? {} : null,
   );
   const activeIncidents = useMemo<ActiveOutageIncidentRow[]>(
-    () => (layer.isLiveOutage ? ((incidentsQuery.data as ActiveOutageIncidentRow[] | undefined) ?? []) : []),
+    () => (layer.isLiveOutage ? rows(incidentsQuery.data) : []),
     [layer.isLiveOutage, incidentsQuery.data],
   );
 
   // ── Full service-territory extent (run once) — drives the "Service
   // territory" button so it fits the map to every customer in the dataset.
-  const territoryQuery = useAnalyticsQuery<TerritoryRow>("exec_territory_bounds", {});
+  const territoryQuery = useC360Query<TerritoryRow>("exec_territory_bounds", {});
   const territoryBounds = useMemo<Bounds | null>(() => {
-    const r = (territoryQuery.data as TerritoryRow[] | undefined)?.[0];
+    const r = rows(territoryQuery.data)[0];
     if (!r) return null;
     return { south: num(r.min_lat), north: num(r.max_lat), west: num(r.min_lon), east: num(r.max_lon) };
   }, [territoryQuery.data]);
@@ -949,6 +938,7 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
   // even though pointsActive stays true the whole time.
   const wantUniformSample = effectiveRenderMode === "dots" && zoom < POINTS_FETCH_ZOOM;
   const [pointsLoading, setPointsLoading] = useState(false);
+  const [pointsError, setPointsError] = useState<string | null>(null);
   // The true in-viewport customer count (pre-cap) and whether /points had to
   // truncate to it — drives the "Showing X of Y" honesty pill below.
   const [pointsTotal, setPointsTotal] = useState(0);
@@ -959,6 +949,7 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
     active: pointsActive,
     responseKey: "customers",
     setLoading: setPointsLoading,
+    setError: setPointsError,
     body: () => {
       // When a program layer is active, ask for per-customer adoption flags
       // (is_enrolled / has_der) so the dots can be colored binary + compared
@@ -968,7 +959,7 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
       // back with its `in_focus` flag (server-side join — no id list crosses).
       const sid = focusActive ? sessionId : undefined;
       return {
-        ...bounds, ...filterStrings(filters), complaint_theme: effectiveComplaintTheme, program_id,
+        ...bounds, ...filterStrings(debouncedFilters), complaint_theme: effectiveComplaintTheme, program_id,
         sessionId: sid, limit: POINTS_LIMIT, sample: wantUniformSample ? "uniform" : "attention",
       };
     },
@@ -980,7 +971,13 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
       setPointsTotal(typeof data.total === "number" ? data.total : 0);
       setPointsSampled(!!data.sampled);
     },
-    deps: [pointsActive, wantUniformSample, bounds, filters, layer.needsProgram, programId, effectiveComplaintTheme, focusActive, sessionId, focusVersion],
+    // focusActive is deliberately NOT a dep (only read at dispatch, above):
+    // writeFocus flips focusActive true OPTIMISTICALLY, before /api/focus/set has
+    // written the session's rows. Triggering on it would fire a cohort-scoped
+    // fetch against an unwritten focus set (empty/stale in_focus). focusVersion
+    // bumps only on the /set ack, so it's the correct sole cohort-change trigger
+    // for both commit and clear — keep focusActive out of this list.
+    deps: [pointsActive, wantUniformSample, bounds, debouncedFilters, layer.needsProgram, programId, effectiveComplaintTheme, sessionId, focusVersion],
   });
 
   // Hold the last successful query result so cells stay rendered while
@@ -1004,9 +1001,104 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
   // (see cohortPointsReady below).
   type PointsCache = { rows: PointRow[]; focusVersion: number };
   const [pointsCache, setPointsCache] = useState<PointsCache>({ rows: [], focusVersion: -1 });
+  // Latest points, readable from stable callbacks (pivotSubject) without
+  // widening their dep arrays — used to resolve a pivot target's coords when
+  // the caller didn't supply them.
+  const pointsCacheRef = useRef(pointsCache);
+  pointsCacheRef.current = pointsCache;
   type ActiveCellCache = { rows: ActiveOutageCellRow[]; resolution: number };
   const [activeCellCache, setActiveCellCache] = useState<ActiveCellCache>({ rows: [], resolution });
   const [activeOutagePointsCache, setActiveOutagePointsCache] = useState<ActiveOutagePointRow[]>([]);
+
+  // The drilled customer's customer_id, resolved from the anchor. When the
+  // anchor was set from a map-dot click it's already known; when it came from a
+  // list-row select (account_number only) we resolve it from the loaded points
+  // by matching the account. customer_id is the ONLY key that spans a
+  // multi-site customer's separate per-site accounts, so the highlight below
+  // keys on it to light every premise (not just the clicked one).
+  const drillCustomerId = useMemo<string | null>(() => {
+    if (drillSubject?.kind !== "customer") return null;
+    if (drillAnchor?.customerId) return drillAnchor.customerId;
+    const acct = drillAnchor?.accountNumber ?? drillSubject.accountNumber;
+    const hit = pointsCache.rows.find((p) => p.account_number === acct);
+    return hit?.customer_id ?? null;
+  }, [drillSubject, drillAnchor, pointsCache.rows]);
+
+  // True when `d` (a map point carrying account_number + premise_number) is
+  // the drilled subject, whichever kind it is — the single place the
+  // client-side identities get compared against the current drill subject.
+  // Premise grain matches the one premise; Customer grain matches EVERY premise
+  // sharing the customer_id (falling back to account_number only until the id
+  // resolves), so a multi-site customer lights all of its dots.
+  const isDrillMatch = useCallback((d: { account_number: string; premise_number?: string; customer_id?: string }): boolean => {
+    if (!drillSubject) return false;
+    if (drillSubject.kind === "premise") return d.premise_number === drillSubject.premiseNumber;
+    // Unreachable: owner is never a drill subject — the "Property owner" line
+    // routes to the full-profile drawer (setFullSubject), not drillSubject. The
+    // branch is kept only to narrow the union.
+    if (drillSubject.kind === "owner") return false;
+    if (drillCustomerId && d.customer_id) return d.customer_id === drillCustomerId;
+    return d.account_number === drillSubject.accountNumber;
+  }, [drillSubject, drillCustomerId]);
+
+  // Grain toggle re-scopes an OPEN drill (user expectation: flip to Customer →
+  // the whole customer lights up and the rail switches to the customer card;
+  // flip back to Premise → return to the originally-clicked location). Keyed
+  // off the anchor so the two views stay two facets of one selection rather
+  // than resetting. No anchor (nothing drilled) → the toggle only affects
+  // counts and the NEXT click, as before.
+  useEffect(() => {
+    if (!drillAnchor) return;
+    setDrillSubject((cur) => {
+      if (!cur) return cur;
+      if (grain === "premise") {
+        if (!drillAnchor.premiseNumber || cur.kind === "premise") return cur;
+        return { kind: "premise", premiseNumber: drillAnchor.premiseNumber };
+      }
+      // grain === "customer"
+      if (!drillAnchor.accountNumber || cur.kind === "customer") return cur;
+      return { kind: "customer", accountNumber: drillAnchor.accountNumber };
+    });
+    // grain is the trigger; drillAnchor is read but must not re-fire this.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [grain]);
+
+  // Rail pivot (the premise ↔ customer chip, or the multi-site premise picker):
+  // switching the subject in the rail is the mirror image of flipping the grain
+  // toggle, so it must move the master grain WITH it — the header selector then
+  // reflects whatever entity the rail is now showing. We update the anchor to
+  // the pivot target first (a picker-chosen premise can differ from the
+  // originally-clicked one), so the grain-flip effect above resolves to the same
+  // subject and leaves this selection intact rather than clobbering it.
+  const pivotSubject = useCallback((s: InspectorSubject) => {
+    if (s.kind === "premise") {
+      setDrillAnchor((a) => ({ accountNumber: a?.accountNumber ?? null, premiseNumber: s.premiseNumber, customerId: a?.customerId ?? null }));
+      setGrain("premise");
+      // Fly the camera to the picked location. A pivot to a specific premise
+      // (e.g. the multi-site picker's "other" home) is a jump to a place, and
+      // that place is often off-screen — so re-centre, don't just swap the rail
+      // card. The blue drill halo then rings it once its dot loads at the new
+      // viewport. Coords come from the caller (roster) or, failing that, the
+      // loaded points.
+      const m = mapRef.current;
+      if (m) {
+        let lat: number | null | undefined = s.lat;
+        let lon: number | null | undefined = s.lon;
+        if (lat == null || lon == null) {
+          const hit = pointsCacheRef.current.rows.find((p) => p.premise_number === s.premiseNumber);
+          if (hit) { lat = num(hit.latitude); lon = num(hit.longitude); }
+        }
+        if (lat != null && lon != null && Number.isFinite(lat) && Number.isFinite(lon)) {
+          m.flyTo({ center: [lon, lat], zoom: Math.max(m.getZoom(), 13.5), duration: 900 });
+        }
+      }
+    } else if (s.kind === "customer") {
+      setDrillAnchor((a) => ({ accountNumber: s.accountNumber, premiseNumber: a?.premiseNumber ?? null, customerId: a?.customerId ?? null }));
+      setGrain("customer");
+    }
+    // owner isn't a grain — the toggle only spans premise/customer, so leave it.
+    setDrillSubject(s);
+  }, []);
 
   // True once the cells actually on screen were fetched for the *current*
   // cohort — false during the round-trip after a cohort change, when the
@@ -1022,6 +1114,38 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
   const cohortPointsReady =
     focusActive && !focusPending && pointsCache.focusVersion === focusVersion;
 
+  // All-ready barrier: the authoritative count and extent (shown in the focus
+  // panel) are only revealed once BOTH the map layers AND the summary have
+  // landed for the current version — so count, dot recolor, and rail headline
+  // flip as one change, not three separate pops.
+  // summaryVersion === focusVersion means the authoritative summary arrived.
+  const cohortReady =
+    cohortCellsReady && cohortPointsReady && summaryVersion === focusVersion;
+
+  // Hex-tier reveal barrier. In the hex tier, points are never fetched
+  // (pointsActive is false when zoomed out), so cohortPointsReady is always false
+  // and cohortReady never fires. Use this instead to gate the blank-then-reveal.
+  // True once BOTH the cohort-scoped cells AND the authoritative summary have landed.
+  const cohortRevealReady = cohortCellsReady && summaryVersion === focusVersion;
+  // While a cohort is active but cells+summary haven't revealed yet, blank the
+  // choropleth so the old territory hexes vanish immediately on commit. The
+  // cells-selected outline (driven by selectedCell on the same source) still
+  // renders from the old geojson because we zero opacity on cells-fill/cells-line
+  // rather than replacing the source — see the Layer paint below.
+  //
+  // Hex tier ONLY: blank-then-reveal is a choropleth behavior. In
+  // the dots tier the reveal is governed by cohortReady (which includes points),
+  // so gating to !dotsVisible keeps a dots-tier box/commit from flashing the hex
+  // "Updating…" cue and from blanking cells the dots view doesn't even show.
+  //
+  // A box/lasso region (selectionPoly present) is excluded too: the drawn hexes
+  // are already traced by the blue selection outline (cells-selected-multi), so
+  // blanking every fill underneath reads as a jarring colors-vanish-then-pop
+  // flicker. Holding the current fill lets the cohort-scoped cells cross-fade in
+  // place when they land. A single hex CLICK (selectedCell, no poly) keeps the
+  // original blank-then-reveal so the territory clearly gives way to the cell.
+  const cellsRevealPending = !dotsVisible && focusActive && !cohortRevealReady && !selectionPoly;
+
   // Base choropleth cells, warehouse-direct (no 1 MB cap). We capture the
   // resolution/programId at request time and store it alongside the rows so
   // drill clicks use the grid that's actually on screen, not the latest.
@@ -1035,21 +1159,30 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
     active: !!bounds && !layer.isLiveOutage,
     responseKey: "cells",
     setLoading: setBaseCellsLoading,
+    setError: setBaseCellsError,
     // Scope the choropleth to the cohort when a focus group is active, so
     // the cells recolor to cohort-only aggregates the instant the cohort
     // changes — no pan/zoom (or the click that used to clear the focus)
     // required. Cells with no cohort members fall through the existing
     // low-n gray guard (MIN_CUSTOMERS_FOR_COLOR) and go transparent.
     body: () => ({
-      resolution, ...bounds, ...filterStrings(filters), complaint_theme: effectiveComplaintTheme,
+      resolution, ...bounds, ...filterStrings(debouncedFilters), complaint_theme: effectiveComplaintTheme,
       sessionId: focusActive ? sessionId : undefined,
+      grain,
     }),
     onData: (rows) => setBaseCache({
       rows,
       resolution,
       focusVersion: focusActive ? focusVersion : -1,
     }),
-    deps: [bounds, resolution, filters, effectiveComplaintTheme, layer.isLiveOutage, focusActive, sessionId, focusVersion],
+    // focusActive intentionally omitted (read at dispatch via the body's
+    // `sessionId: focusActive ? …`). It flips true OPTIMISTICALLY in writeFocus
+    // before /api/focus/set writes the session rows; keying the fetch on it would
+    // race the write and return 0 cohort cells, emptying baseCache → a "Loading
+    // map…" flash (visible over dots too, since that cue isn't dots-gated) and a
+    // blank-hex gap. focusVersion bumps only on the /set ack, so it alone drives
+    // both the commit and clear refetches at the right time.
+    deps: [bounds, resolution, debouncedFilters, effectiveComplaintTheme, layer.isLiveOutage, sessionId, focusVersion, cellsRetrySeq, grain],
   });
 
   // Program-layer cells, same cap-free path. Only fires when a program layer
@@ -1062,9 +1195,9 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
     active: !!programCellsActive,
     responseKey: "cells",
     setLoading: setProgramCellsLoading,
-    body: () => ({ program_id: programId, resolution, ...bounds, ...filterStrings(filters) }),
+    body: () => ({ program_id: programId, resolution, ...bounds, ...filterStrings(debouncedFilters), grain }),
     onData: (rows) => setProgramCache({ rows, resolution, programId }),
-    deps: [programCellsActive, bounds, programId, resolution, filters],
+    deps: [programCellsActive, bounds, programId, resolution, debouncedFilters, grain],
   });
 
   // Active-outage "% currently out" cells, warehouse-direct. Only while the
@@ -1100,6 +1233,36 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
     setSelectedCell(null);
   }, [baseCache.resolution, programCache.resolution, activeCellCache.resolution]);
 
+  // ── Dev instrumentation ───────────────────────────────────────────────────
+  // First cells rendered (base layer, first time rows arrive from empty).
+  const firstCellsRenderedRef = useRef(false);
+  useEffect(() => {
+    if (!firstCellsRenderedRef.current && baseCache.rows.length > 0) {
+      firstCellsRenderedRef.current = true;
+      perfMark("c360:cells:first-rendered");
+      perfMeasure("c360:cells:first-rendered", "c360:app-shell-interactive");
+      if (import.meta.env.DEV) console.info("[c360 perf] First cells rendered");
+    }
+  }, [baseCache.rows.length]);
+
+  // Warm layer change (any change after first cells rendered).
+  const prevLayerId = useRef(layerId);
+  useEffect(() => {
+    if (firstCellsRenderedRef.current && layerId !== prevLayerId.current) {
+      prevLayerId.current = layerId;
+      perfMark("c360:warm-layer-change");
+    }
+  }, [layerId]);
+
+  // Warm filter change (debounced filter settles to a new value after first render).
+  const prevDebouncedFilters = useRef(debouncedFilters);
+  useEffect(() => {
+    if (firstCellsRenderedRef.current && debouncedFilters !== prevDebouncedFilters.current) {
+      prevDebouncedFilters.current = debouncedFilters;
+      perfMark("c360:warm-filter-change");
+    }
+  }, [debouncedFilters]);
+
   const baseGeojson = useMemo(() => cellsToGeoJSON(baseCache.rows), [baseCache.rows]);
   const programGeojson = useMemo(() => cellsToGeoJSON(programCache.rows), [programCache.rows]);
   const activeOutageGeojson = useMemo(() => cellsToGeoJSON(activeCellCache.rows), [activeCellCache.rows]);
@@ -1130,7 +1293,12 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
   // grid otherwise sits unchanged for a second, then snaps, which reads as a
   // jarring after-the-fact jump. NOTE: feedback is additive DOM only; we do not
   // touch the hex layer's paint or interactivity (doing so breaks click-drill).
+  // Hex tier ONLY (!dotsVisible): once dots carry the view the choropleth is
+  // faded out, so its background re-resolve should never flash the centered cue
+  // — a box/lasso commit over dots already renders correctly and only the rail
+  // is fetching (cellsRevealPending is likewise gated to the hex tier below).
   const gridResChanging =
+    !dotsVisible &&
     (baseCellsLoading || (layer.needsProgram && programCellsLoading) || (layer.isLiveOutage && activeCellsLoading)) &&
     activeRows.length > 0 &&
     effectiveResolution !== resolution;
@@ -1149,6 +1317,16 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
     if (mn === mx) return { minVal: mn, maxVal: mn + 1 };
     return { minVal: mn, maxVal: mx };
   }, [activeRows, layer]);
+
+  // For complaint volume at premise grain: percent of complaints in the current
+  // viewport that couldn't be pinned to a specific premise (for legend footnote).
+  const unmappedPct = useMemo(() => {
+    if (layerId !== "complaints_per_1k" || grain !== "premise" || baseCache.rows.length === 0) return 0;
+    const pinned   = baseCache.rows.reduce((s, r) => s + (r.sum_complaints_90d ?? 0), 0);
+    const unmapped = baseCache.rows.reduce((s, r) => s + (r.n_complaints_unmapped ?? 0), 0);
+    const total = pinned + unmapped;
+    return total > 0 ? Math.round(100 * unmapped / total) : 0;
+  }, [layerId, grain, baseCache.rows]);
 
   // The zoomed-out view is the value choropleth (`cells-fill`, painted by
   // `fillColor` below): each H3 hexagon shaded by its ACTUAL metric value on
@@ -1169,16 +1347,35 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
     [selectedCustomers],
   );
 
-  // Zoomed-out, the same box/lasso selects the HEXES whose centroid falls in
-  // the shape (dots aren't loaded yet). Their summable cell counts aggregate
-  // into a region overview, benchmarked vs the whole visible area.
+  // Zoomed-out, the same box/lasso selects the HEXES that overlap the shape
+  // (dots aren't loaded yet). Overlap-inclusive: any hex touching the shape
+  // boundary is included, not just hexes whose centroid is inside.
   const selectedHexes = useMemo(() => {
     if (dotsVisible || !selectionPoly || selectionPoly.length < 3) return [] as CellRow[];
-    return baseCache.rows.filter((r) =>
-      pointInPolygon(num(r.centroid_lon), num(r.centroid_lat), selectionPoly),
-    );
+    return baseCache.rows.filter((r) => {
+      // cellToBoundary returns [lat,lng]; the selection ring is [lng,lat] — flip.
+      const ring = cellToBoundary(String(r.h3_index)).map(([lat, lng]) => [lng, lat]) as [number, number][];
+      return polygonsIntersect(ring, selectionPoly);
+    });
   }, [dotsVisible, selectionPoly, baseCache.rows]);
   const selectedHexIds = useMemo(() => selectedHexes.map((r) => r.h3_index), [selectedHexes]);
+
+  // Grain-following spread detection: after a hex/box commit under Customer
+  // grain, the cohort may light hexes beyond the drawn area because premise_id is
+  // NULL, so every hex holding any premise of the cohort's customers is lit.
+  // Detect this by comparing the number of colored cohort cells on screen against
+  // how many cells were in the drawn selection.
+  const cohortCellsShown = useMemo(() =>
+    baseCache.rows.filter((r) => num(r.n_customers) >= MIN_CUSTOMERS_FOR_COLOR).length,
+  [baseCache.rows]);
+  const selectionSpreadAcrossHexes =
+    grain === "customer" && cohortCellsReady &&
+    cohortCellsShown > (selectedCell ? 1 : selectedHexIds.length);
+
+  // Reset dismiss flag whenever the spread condition disappears (grain flip, clear).
+  useEffect(() => {
+    if (!selectionSpreadAcrossHexes) setSpreadNoteDismissed(false);
+  }, [selectionSpreadAcrossHexes]);
 
   // A committed box/lasso becomes a cohort definer, split by tier: over dots,
   // the exact account_numbers (resolved to customer_id server-side — no lossy
@@ -1193,17 +1390,40 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
     if (selectionPoly === lastFocusPolyRef.current) return;
     lastFocusPolyRef.current = selectionPoly;
     if (dotsVisible) {
-      const accts = selectedCustomers.map((c) => c.account_number);
-      if (accts.length > 0) writeFocus({ accountNumbers: accts }, "Drawn area");
+      // Grain-following, mirroring the hex branches: under Premise grain
+      // the cohort is EXACTLY the drawn premises (send premise_number → the
+      // server writes a real premise_id, so `in_focus` lights only those dots).
+      // Under Customer grain, send account_number → the cohort spreads to every
+      // premise of the drawn customers (premise_id NULL server-side), which is
+      // the intended multi-site behavior. Using premise_number (never the
+      // BIGINT premise_id) keeps the client on the string identity throughout.
+      if (grain === "premise") {
+        const prems = Array.from(new Set(selectedCustomers.map((c) => c.premise_number).filter(Boolean)));
+        if (prems.length > 0) {
+          writeFocus({ premiseNumbers: prems, grain }, "Drawn area", prems.length);
+        }
+      } else {
+        const accts = selectedCustomers.map((c) => c.account_number);
+        if (accts.length > 0) {
+          // Count distinct premises (premise_number) for the optimistic display.
+          const approxLocations = new Set(selectedCustomers.map((c) => c.premise_number)).size;
+          writeFocus({ accountNumbers: accts, grain }, "Drawn area", approxLocations);
+        }
+      }
     } else {
       const cells = selectedHexIds;
       if (cells.length > 0) {
-        writeFocus({ hexes: cells, hexRes: effectiveResolution }, cells.length === 1 ? "This hex" : `${cells.length} hexes`);
+        // num(): the warehouse-direct /cells route returns n_customers as a
+        // JSON string, so a bare `s + r.n_customers` string-concatenates
+        // ("0"+"5" → "05") and yields a garbage provisional count. Coerce first.
+        const approxLocations = selectedHexes.reduce((s, r) => s + num(r.n_customers), 0);
+        // Send grain so the server can implement grain-following spread.
+        writeFocus({ hexes: cells, hexRes: effectiveResolution, grain }, cells.length === 1 ? "This hex" : `${cells.length} hexes`, approxLocations || undefined);
       }
     }
     // selectedCustomers/selectedHexIds/writeFocus intentionally omitted: keying
     // on the polygon identity is what scopes this to a fresh selection commit;
-    // selectedHexIds/effectiveResolution are read at commit time.
+    // selectedHexIds/effectiveResolution/grain are read at commit time.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectionPoly, dotsVisible]);
 
@@ -1313,7 +1533,7 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
   const liveMode = !!layer.isLiveOutage && !genieActive;
   const derLabel = useMemo(() => {
     if (!programMode) return null;
-    const p = (programs.data as ProgramRow[] | undefined)?.find((x) => x.program_id === programId);
+    const p = rows(programs.data).find((x) => x.program_id === programId);
     return derLabelForProgram(p?.program_name, programId || undefined);
   }, [programMode, programs.data, programId]);
   const derComparison = programMode && derLabel != null;
@@ -1374,9 +1594,11 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
   const deckLayers = useMemo(() => {
     // A blue halo around the drilled customer so the individual focus reads at
     // a glance (paired with dimming every other dot below).
-    const drillRing = (p: PointRow) => new ScatterplotLayer<PointRow>({
+    // Ring all matched dots — a customer-grain selection spans multiple premises,
+    // all of which should be outlined (not just the first one found).
+    const drillRing = (pts: PointRow[]) => new ScatterplotLayer<PointRow>({
       id: "drill-highlight",
-      data: [p],
+      data: pts,
       getPosition: (d) => [num(d.longitude), num(d.latitude)],
       getFillColor: [0, 0, 0, 0],
       stroked: true,
@@ -1396,7 +1618,7 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
     // customers as dots at any zoom, colored by the active lens metric.
     const buildGenieLayers = () => {
       const matched = genieCustomers;
-      const gDrillPoint = drillSubject ? matched.find((p) => isDrillMatch(p)) : null;
+      const gDrillPoints = drillSubject ? matched.filter((p) => isDrillMatch(p)) : null;
       const genieLayers: any[] = [
         new ScatterplotLayer<PointRow>({
           id: "genie-dots",
@@ -1418,15 +1640,15 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
           highlightColor: [79, 143, 247, 230],
           onClick: (info) => {
             const o = info.object as PointRow | undefined;
-            // A literal map-dot click opens the Premise inspector by default
-            // (entity-grain §6.3) — the occupant is one pivot chip away.
-            if (o) selectPremise(o.premise_number);
+            // Dot click resolves to the selected grain's inspector, recording
+            // the full identity so a later grain flip re-scopes this selection.
+            if (o) selectFromPoint(o, grain);
             return true;
           },
           updateTriggers: { getFillColor: [mn, mx, dotField, dotReversed, drillSubject], getRadius: [mn, mx, dotField] },
         }),
       ];
-      if (gDrillPoint) genieLayers.push(drillRing(gDrillPoint));
+      if (gDrillPoints && gDrillPoints.length > 0) genieLayers.push(drillRing(gDrillPoints));
       return genieLayers;
     };
 
@@ -1580,9 +1802,11 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
         highlightColor: [79, 143, 247, 230],
         onClick: (info) => {
           const o = info.object as PointRow | undefined;
-          // A literal map-dot click opens the Premise inspector by default
-          // (entity-grain §6.3) — the occupant is one pivot chip away.
-          if (o) selectPremise(o.premise_number);
+          // Dot click resolves to the selected grain's inspector.
+          if (o) {
+            if (grain === "premise") selectPremise(o.premise_number);
+            else selectCustomer(o.account_number);
+          }
           return true;
         },
         updateTriggers: {
@@ -1591,17 +1815,17 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
         },
       }),
     ];
-    // Halo the drilled subject (if it's among the loaded dots).
+    // Halo all matched dots — a customer-grain selection spans multiple premises.
     if (hasDrill) {
-      const dp = pointsCache.rows.find((p) => isDrillMatch(p));
-      if (dp) layers.push(drillRing(dp));
+      const dps = pointsCache.rows.filter((p) => isDrillMatch(p));
+      if (dps.length > 0) layers.push(drillRing(dps));
     }
     if (shapeLayer) layers.push(shapeLayer);
     return layers;
-  }, [fadeZoom, dotOpacity, pointsCache.rows, selectPremise, isDrillMatch,
+  }, [fadeZoom, dotOpacity, pointsCache.rows, selectPremise, selectCustomer, selectFromPoint, isDrillMatch,
       selectTool, selectedIds, shapeToRender, genieActive, genieCustomers,
       programMode, derComparison, drillSubject, dotField, dotReversed, dotScale,
-      cohortPointsReady, focusVersion,
+      cohortPointsReady, focusVersion, grain,
       liveMode, activeOutagePointsCache, activeIncidents]);
 
   // Tooltip for deck layers (hex + dots). Heatmap isn't pickable.
@@ -1668,7 +1892,9 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
   // bbox we loaded. Small pans reuse data already on hand (no edge blanking,
   // no extra warehouse round trip); a pan/zoom that escapes the padded area
   // still fetches, padded again around the new viewport.
-  const lastFetchedBoundsRef = useRef<Bounds | null>(null);
+  // Seeded with the same initial estimate as `bounds` so the first onMoveEnd
+  // (after the basemap loads) only re-fetches if the real viewport differs.
+  const lastFetchedBoundsRef = useRef<Bounds | null>(initialBoundsFromView());
 
   const onMoveEnd = useCallback((evt: ViewStateChangeEvent) => {
     const map = evt.target;
@@ -1691,8 +1917,10 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
   // unmount by the effect right after it).
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
 
-  // Bootstrap bounds once on load so the very first query has real
-  // params instead of waiting for the user to interact.
+  // Refine bounds with the exact MapLibre viewport once the basemap has loaded.
+  // The initial query was already dispatched from `initialBoundsFromView()`;
+  // this update corrects for any difference between the estimate and the real
+  // container size, and populates `lastFetchedBoundsRef` with exact values.
   const onLoad = useCallback(() => {
     const map = mapRef.current;
     if (!map) return;
@@ -1712,8 +1940,7 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
     maplibreMap.touchZoomRotate.disableRotation();
 
     // Dev-only escape hatch for inspecting MapLibre's transform/canvas state
-    // directly (e.g. after a tab round-trip) — see the map-resize-desync
-    // design doc's Phase 0 repro. Stripped from production bundles.
+    // directly (e.g. after a tab round-trip). Stripped from production bundles.
     if (import.meta.env.DEV) (window as any).__c360map = maplibreMap;
 
     // Guard against MapLibre losing sync with its container — e.g. the
@@ -1723,8 +1950,7 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
     // slips through anyway. Attached here, not in an empty-deps effect: react-
     // map-gl instantiates the MapLibre instance in a microtask after mount, so
     // an effect that reads mapRef.current with `[]` deps runs before it exists
-    // and permanently no-ops (confirmed root cause of the old dead observer —
-    // see map-resize-desync design doc).
+    // and permanently no-ops (confirmed root cause of the old dead observer).
     const el = maplibreMap.getContainer();
     const ro = new ResizeObserver(() => {
       if (el.clientWidth > 0 && el.clientHeight > 0) maplibreMap.resize();
@@ -1755,21 +1981,47 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
     if (genieActive || dotsVisible) return;
     const features = e.features || [];
     const cellFeature = features.find((f) => f.layer?.id === "cells-fill");
-    if (!cellFeature) {
-      // Clicked empty map in the choropleth → clear the focus group.
+    const h3 = typeof cellFeature?.properties?.h3_index === "string"
+      ? (cellFeature.properties.h3_index as string) : null;
+    const clickedCell = h3 ? baseCache.rows.find((r) => r.h3_index === h3) : undefined;
+    // A cell is "populated" if it exists in the current cell set with at least
+    // MIN_CUSTOMERS_FOR_COLOR customers. A cohort-blanked cell (no row in the
+    // cohort-scoped geojson), a gray/empty cell, or a click that missed any cell
+    // entirely all fall into the empty-click path (→ clear to territory).
+    // NOTE: we test here, never by disabling cells-fill interactivity — that
+    // would break click-drill through the layer to underlying map features.
+    const hitPopulatedHex = !!clickedCell && num(clickedCell.n_customers) >= MIN_CUSTOMERS_FOR_COLOR;
+
+    if (!hitPopulatedHex) {
+      // Empty click (blank space, gray cell, or cohort-blanked cell) → clear to
+      // territory, exactly like the dots tier. Undoable via toast. Also drop
+      // any box/lasso region: selectionPoly drives BOTH the blue selection box and
+      // the per-hex blue outlines (selectedHexes), so leaving it set would strand
+      // those outlines on the map after the focus is gone. lastFocusPolyRef reset
+      // so an identical redraw still re-commits.
       setSelectedCell(null);
+      setSelectionPoly(null);
+      setDrawPts([]);
+      lastFocusPolyRef.current = null;
       if (focusActive) clearFocus();
       return;
     }
-    const h3 = cellFeature.properties?.h3_index;
-    if (typeof h3 === "string") {
-      // Commit the outline (selectedCell) on this frame; the cohort recolor +
-      // accent outline follow asynchronously once writeFocus resolves.
-      setSelectedCell(h3);
-      setDrillSubject(null);
-      writeFocus({ hex: { cellId: h3, resolution: effectiveResolution } }, "This hex");
-    }
-  }, [genieActive, dotsVisible, focusActive, clearFocus, writeFocus, effectiveResolution]);
+
+    // Populated hex → commit it as the focus, superseding any prior box shape
+    // WITHOUT dropping the focus (don't call clearSelection, which also nulls
+    // selectedCell and would kill the outline for this frame).
+    setSelectionPoly(null);
+    setDrawPts([]);
+    lastFocusPolyRef.current = null;
+    if (h3 === selectedCell) return; // already focused — avoid needless round-trip
+    setSelectedCell(h3);
+    setDrillSubject(null);
+    writeFocus(
+      { hex: { cellId: h3!, resolution: effectiveResolution }, grain },
+      "This hex",
+      clickedCell!.n_customers,
+    );
+  }, [genieActive, dotsVisible, focusActive, clearFocus, writeFocus, effectiveResolution, baseCache.rows, selectedCell, grain]);
 
   const onMapMouseDown = useCallback((e: MapLayerMouseEvent) => {
     if (!selectTool) return;
@@ -1822,12 +2074,16 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
   // interacting with the group; only a click OUTSIDE it clears.
   const onDeckClick = useCallback((info: any) => {
     if (info?.object || selectTool) return; // hit a dot, or mid-draw
+    // In the hex tier, MapLibre's cells-fill owns all click handling (onMapClick).
+    // deck must not race onMapClick — a simultaneous fire causes non-deterministic
+    // focus clears or double-commits. Guard here so deck is fully silent in hex view.
+    if (!dotsVisible && !genieActive) return;
     const c = info?.coordinate;
     if (selectionPoly && c && pointInPolygon(c[0], c[1], selectionPoly)) return;
     if (selectionPoly) { clearSelection(); setDrillSubject(null); return; }
     if (genieCustomers.length > 0) { resetGenie(); setDrillSubject(null); return; }
     if (drillSubject) { closeDrill(); }
-  }, [selectTool, selectionPoly, genieCustomers.length, drillSubject, clearSelection, resetGenie, closeDrill]);
+  }, [selectTool, dotsVisible, genieActive, selectionPoly, genieCustomers.length, drillSubject, clearSelection, resetGenie, closeDrill]);
 
   // "Frame territory" — pure navigation: fit the camera to every customer in the
   // dataset. Always available; does NOT touch the focus group (clearing is a
@@ -1886,6 +2142,13 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
   // timestamp so re-picking the same customer still re-focuses.
   useEffect(() => {
     if (!focus) return;
+    // Drawer location-switch: sync to one premise without tearing down the
+    // active cohort/genie context. pivotSubject flies the camera and sets the
+    // drill (blue halo), reusing the same path as the in-map rail pivot.
+    if (focus.premiseNumber && !focus.account) {
+      pivotSubject({ kind: "premise", premiseNumber: focus.premiseNumber, lat: focus.lat, lon: focus.lon });
+      return;
+    }
     clearSelection();
     resetGenie();
     if (focus.account) setDrillSubject({ kind: "customer", accountNumber: focus.account });
@@ -1929,13 +2192,41 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
               <span className="context-scope-label"><strong>{scope.label}</strong></span>
               {groupData && (
                 <span className={`context-count${groupLoading ? " is-refreshing" : ""}`}>
-                  {formatUnitCount(fmtNum(groupData.total ?? 0), groupData.total ?? 0, "premise")}
+                  {formatUnitCount(
+                    fmtNum(grain === "customer" ? (groupData.distinctCustomers ?? groupData.total ?? 0) : (groupData.total ?? 0)),
+                    grain === "customer" ? (groupData.distinctCustomers ?? groupData.total ?? 0) : (groupData.total ?? 0),
+                    grain === "customer" ? "customer" : "premise",
+                  )}
                 </span>
               )}
             </>
           ) : (
             <span className="context-scope-label"><strong>Service territory</strong></span>
           )}
+        </div>
+        {/* Master grain selector — drives the headline count, dot selection
+            semantics, and the default inspector that opens on a dot click. */}
+        <div className="grain-selector" title="Choose the entity your clicks and counts refer to">
+          <span className="map-select-label">View by</span>
+          {(["customer", "premise"] as const).map((g) => {
+            const grainSupported = (layer.supportedGrains ?? ['premise', 'customer']).includes(g);
+            return (
+              <button
+                key={g}
+                type="button"
+                className={`map-select-btn ${grain === g ? "active" : ""} ${!grainSupported ? "disabled" : ""}`}
+                aria-disabled={!grainSupported}
+                title={!grainSupported ? "This layer's metric is customer-level — grain locked to Customer" : undefined}
+                onClick={() => {
+                  if (!grainSupported) return;
+                  preSnapGrainRef.current = null;
+                  setGrain(g);
+                }}
+              >
+                {g === "customer" ? "Customer" : "Premise"}
+              </button>
+            );
+          })}
         </div>
         <div className="context-actions">
           {/* Attribute filters are a live view-slice independent of the focus
@@ -2001,13 +2292,31 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
         <div className="map-toolbar">
           <div className="map-layer-picker">
             <label>Layer</label>
-            <select value={layerId} onChange={(e) => setLayerId(e.target.value)}>
+            <select value={layerId} onChange={(e) => {
+              const newId = e.target.value;
+              const spec = LAYERS.find((l) => l.id === newId);
+              const supported = spec?.supportedGrains ?? (['premise', 'customer'] as const);
+              const g = grain as 'premise' | 'customer';
+              if (!supported.includes(g)) {
+                // New layer doesn't support current grain — snap to customer and remember.
+                preSnapGrainRef.current = g;
+                setGrain(supported[0] as Grain);
+              } else if (preSnapGrainRef.current !== null && supported.includes(preSnapGrainRef.current)) {
+                // Returning from a customer-only layer — restore the remembered grain.
+                setGrain(preSnapGrainRef.current as Grain);
+                preSnapGrainRef.current = null;
+              }
+              setLayerId(newId);
+            }}>
               {LAYERS.map((l) => (
                 <option key={l.id} value={l.id}>{l.label}</option>
               ))}
             </select>
             {(baseCellsLoading || pointsLoading || (layer.needsProgram && programCellsLoading) || (layer.isLiveOutage && activeCellsLoading)) && (
               <span className="map-loading-pip" title="Updating…" />
+            )}
+            {pointsError && !pointsLoading && (
+              <span className="map-loading-pip" style={{ background: "var(--red, #ef4444)", animation: "none" }} title="Customer dots unavailable — pan or zoom to retry" />
             )}
           </div>
           {/* Complaint volume can be focused on one complaint theme — pick a
@@ -2038,7 +2347,7 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
                 onChange={(e) => setProgramId(e.target.value)}
                 disabled={programs.loading}
               >
-                {((programs.data as ProgramRow[] | undefined) || []).map((p) => (
+                {rows(programs.data).map((p) => (
                   <option key={p.program_id} value={p.program_id}>{p.program_name}</option>
                 ))}
               </select>
@@ -2048,7 +2357,14 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
               obvious from the map and spelled out by the legend, so we don't
               prepend a Density/Dots chip to the layer description. */}
           <div className="map-layer-desc">
-            <span className="map-layer-desc-text">{layer.description}</span>
+            <span className="map-layer-desc-text">{
+              grain === "premise"
+                ? layer.id === "complaints_per_1k" ? "Complaints per 1,000 premises in the last 90 days. ~35% of complaints can't be attributed to a specific address and are excluded from this count."
+                : layer.id === "outage_exposure"   ? "Average outage minutes per premise in the last 90 days."
+                : layer.id === "program_enrolled"  ? "Per-premise dots colored by enrollment in the selected program. Only the enrolled site lights up for multi-site customers. Zoomed out, a hex grid shaded by enrollment rate."
+                : layer.description
+                : layer.description
+            }</span>
           </div>
           {/* Force dots or hexes at any zoom, instead of the automatic
               cross-fade. Disabled (and reads as Auto) during a Genie answer
@@ -2132,13 +2448,65 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
           )}
         </div>
 
-        {/* Center-screen cue while the H3 grid is re-resolving on zoom — purely
-            additive (pointer-events: none), so it never affects the hexes'
-            rendering or click hit-testing. */}
-        {gridResChanging && (
+        {/* Grain-spread note: transient, dismissible. Shown only in the
+            hex tier when a Customer-grain selection lit hexes beyond the drawn
+            area (because premise_id is NULL → every hex holding any premise of
+            the cohort's customers lights up). */}
+        {!dotsVisible && selectionSpreadAcrossHexes && !spreadNoteDismissed && (
+          <div className="map-spread-note" role="status">
+            <span>Customer grain — these customers' premises in other areas are highlighted too.</span>
+            <button
+              type="button"
+              className="map-spread-note-dismiss"
+              onClick={() => setSpreadNoteDismissed(true)}
+              aria-label="Dismiss"
+            >×</button>
+          </div>
+        )}
+
+        {/* Undo toast: shown after an accidental empty-click clear.
+            Auto-dismisses after 7 s; clicking Undo replays the last cohort. */}
+        {undoSnapshot && (
+          <div className="map-undo-toast" role="status">
+            <span>Focus cleared</span>
+            <button type="button" className="map-undo-btn" onClick={restoreFocus}>Undo</button>
+          </div>
+        )}
+
+        {/* Center-screen cue while the H3 grid is re-resolving on zoom, or
+            while a hex cohort commit is in the blank-then-reveal gap.
+            Purely additive (pointer-events: none). */}
+        {(gridResChanging || cellsRevealPending) && (
           <div className="map-center-loading" role="status" aria-live="polite">
             <span className="map-center-spinner" />
-            <span>Updating map…</span>
+            <span>Updating…</span>
+          </div>
+        )}
+
+        {/* First-load spinner: no prior data, warehouse request in flight.
+            Pointer-events: none so it doesn't block map interaction. */}
+        {baseCellsLoading && baseCache.rows.length === 0 && !baseCellsError && (
+          <div className="map-center-loading" role="status" aria-live="polite" style={{ pointerEvents: "none" }}>
+            <span className="map-center-spinner" />
+            <span>Loading map…</span>
+          </div>
+        )}
+
+        {/* Terminal error — prior data (if any) still shown; Retry available. */}
+        {baseCellsError && !baseCellsLoading && (
+          <div
+            className="map-center-loading"
+            role="alert"
+            style={{ pointerEvents: "auto", cursor: "default", flexDirection: "column", gap: 8, borderRadius: 12, padding: "14px 20px" }}
+          >
+            <span style={{ fontSize: 12, opacity: 0.8 }}>Map data unavailable</span>
+            <button
+              type="button"
+              className="theme-toggle"
+              onClick={() => { setBaseCellsError(null); setCellsRetrySeq((n) => n + 1); }}
+            >
+              Retry
+            </button>
           </div>
         )}
 
@@ -2182,8 +2550,11 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
                   // itself is scoped to the cohort (see the cells fetch above),
                   // so this fill IS the cohort view already — "where" and "how
                   // much" in one layer, on the same legend scale.
+                  // cellsRevealPending: zero opacity hides stale territory fills
+                  // immediately on commit while cells-selected (same source) keeps
+                  // rendering the clicked-hex outline from the old geojson.
                   "fill-color": fillColor as any,
-                  "fill-opacity": hexFillOpacity,
+                  "fill-opacity": cellsRevealPending ? 0 : hexFillOpacity,
                   "fill-opacity-transition": { duration: 160, delay: 0 },
                 }}
               />
@@ -2193,7 +2564,7 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
                 paint={{
                   "line-color": "rgba(255,255,255,0.22)",
                   "line-width": 0.5,
-                  "line-opacity": hexLineOpacity,
+                  "line-opacity": cellsRevealPending ? 0 : hexLineOpacity,
                 }}
               />
               {/* Outline the drilled hex so the focus reads on the map. */}
@@ -2233,13 +2604,27 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
               dots which always rendered 4-8px — a few pixels of picking slack
               keeps dot clicks reliable at that zoom without changing the
               rendered (visual) size. */}
-          <DeckOverlay interleaved layers={deckLayers} getTooltip={getDeckTooltip} onClick={onDeckClick} pickingRadius={4} />
+          {/* getCursor: deck.gl overwrites the canvas cursor on every pointermove,
+              so <Map cursor="crosshair"> is ineffective while deck is mounted.
+              Drive it from deck instead so the crosshair holds while a draw tool
+              is armed. getDragging/isHovering are the standard deck cursor args. */}
+          <DeckOverlay
+            interleaved
+            layers={deckLayers}
+            getTooltip={getDeckTooltip}
+            onClick={onDeckClick}
+            pickingRadius={4}
+            getCursor={({ isDragging }: { isDragging: boolean }) =>
+              selectTool ? "crosshair" : isDragging ? "grabbing" : "grab"}
+          />
         </Map>
 
         <MapLegend
           layer={layer}
+          grain={grain}
           minVal={minVal}
           maxVal={maxVal}
+          unmappedPct={unmappedPct}
           program={programMode && dotsVisible ? {
             derComparison, derLabel, counts: programCounts,
           } : null}
@@ -2355,31 +2740,26 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
       {drillSubject?.kind === "premise" ? (
         // Drilling INTO one subject is the only thing that overrides the
         // focus group in the rail (it's a detail view, not a scope). A dot
-        // click resolves here by default (entity-grain §6.3) — the pivot
+        // click resolves here by default — the pivot
         // chip switches to the Customer card below without leaving the rail.
         <PremiseDrillCard
           premiseNumber={drillSubject.premiseNumber}
           onClose={closeDrill}
           onOpenFull={onJumpToSubject}
-          onPivot={setDrillSubject}
+          onPivot={pivotSubject}
           backToGroup={focusActive}
         />
       ) : drillSubject?.kind === "customer" ? (
         <CustomerDrillPanel
           accountNumber={drillSubject.accountNumber}
+          // The premise this customer was drilled INTO from (if any) — the
+          // anchor still holds it after the pivot, so the customer card can
+          // offer a one-click return to exactly where the user started.
+          originPremiseNumber={drillAnchor?.premiseNumber ?? null}
           onClose={closeDrill}
           onOpenFull={onJumpToSubject}
-          onPivot={setDrillSubject}
+          onPivot={pivotSubject}
           backToGroup={focusActive}
-        />
-      ) : drillSubject?.kind === "owner" ? (
-        // Reached only via the Owner pivot chip from a Premise drill card —
-        // never a dot-click target directly (entity-grain §6.1).
-        <OwnerDrillCard
-          ownerNumber={drillSubject.ownerNumber}
-          onClose={closeDrill}
-          onOpenFull={onJumpToSubject}
-          onPivot={setDrillSubject}
         />
       ) : (
         // The rail ALWAYS reflects the focus group — the chosen cohort (hex /
@@ -2389,11 +2769,9 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
           loading={groupLoading}
           focusActive={focusActive}
           label={focusLabel}
-          unit={focusUnit}
-          onUnitChange={setFocusUnit}
+          grain={grain}
           onSelectCustomer={selectCustomer}
           onSelectPremise={selectPremise}
-          onSelectOwner={selectOwner}
           program={programLens}
         />
       )}
@@ -2413,7 +2791,18 @@ function ExplorerMapInner({ onJumpToSubject, focus, visible = true }: {
             {focusActive && focusSummary ? (
               <div className="focus-status active">
                 <span className="focus-status-count">
-                  <strong>{fmtNum(focusSummary.cohortLocations)}</strong> of {fmtNum(focusSummary.territoryLocations)} {unitLabel(focusSummary.territoryLocations, "premise")} in focus
+                  {cohortReady ? (
+                    <>
+                      <strong>{fmtNum(focusSummary.cohortLocations)}</strong> of {fmtNum(focusSummary.territoryLocations)} {unitLabel(focusSummary.territoryLocations, "premise")} in focus
+                    </>
+                  ) : focusSummary.cohortLocations > 0 ? (
+                    // Provisional count while layers + summary are loading —
+                    // shown immediately for optimistic selections so the panel
+                    // isn't blank while the warehouse round-trips complete.
+                    <><strong>~{fmtNum(focusSummary.cohortLocations)}</strong> in focus (counting…)</>
+                  ) : (
+                    <>Counting…</>
+                  )}
                 </span>
                 <div className="focus-status-actions">
                   {/* Frame focus lives on the top bar now — no need to
@@ -2528,8 +2917,8 @@ interface ProgramLegend {
   counts: { enrolledDetected: number; detectedOnly: number; enrolledOnly: number; neither: number };
 }
 
-function MapLegend({ layer, minVal, maxVal, program, dots, live }: {
-  layer: LayerSpec; minVal: number; maxVal: number; program?: ProgramLegend | null;
+function MapLegend({ layer, grain, minVal, maxVal, unmappedPct, program, dots, live }: {
+  layer: LayerSpec; grain: Grain; minVal: number; maxVal: number; unmappedPct?: number; program?: ProgramLegend | null;
   // When dots are the view (non-program), they're colored per-customer by the
   // active metric — so the legend shows that metric's own scale, not the hex
   // choropleth rate. `attention` flags the composite-score fallback.
@@ -2582,7 +2971,7 @@ function MapLegend({ layer, minVal, maxVal, program, dots, live }: {
       <div className="map-legend">
         <div className="map-legend-title">
           {dots.label}
-          <span className="map-legend-sub"> · {dots.attention ? "composite score" : "per customer · 90d"}</span>
+          <span className="map-legend-sub"> · {dots.attention ? "composite score" : grain === "premise" && (layer.supportedGrains ?? ['premise', 'customer']).includes('premise') ? "per premise · 90d" : "per customer · 90d"}</span>
         </div>
         <div className="legend-bar" style={{ background: `linear-gradient(to right, ${gradient})` }} />
         <div className="legend-axis">
@@ -2652,19 +3041,36 @@ function MapLegend({ layer, minVal, maxVal, program, dots, live }: {
     ? NUMERIC_LEGEND_GRADIENT_REVERSED
     : NUMERIC_LEGEND_GRADIENT;
   // A "rate per X" metric (unitNote set) reads the unit once in the title and
-  // shows bare axis numbers — so we don't repeat e.g. "/1K (90d)" on every tick.
+  // shows bare axis numbers — so we don’t repeat e.g. "/1K (90d)" on every tick.
   const axisUnit = layer.unitNote ? "" : layer.unit;
+  // Complaint volume re-grains at premise grain — reflect that in the unit note.
+  const effectiveUnitNote = (layer.id === "complaints_per_1k" && grain === "premise")
+    ? "per 1,000 premises · 90d"
+    : layer.unitNote;
+  // Bucket-2 layers (customer-native, no premise truth): their supportedGrains
+  // locks them to customer, so this note only appears in edge-case races. Keep it
+  // as a backstop.
+  const showCustomerAttributedNote = layer.customerAttributed && grain !== "customer";
+  // Complaint volume at premise grain: ~35% of complaints have no premise_id.
+  // Show the live fraction so the legend is honest about coverage.
+  const showUnmappedNote = layer.id === "complaints_per_1k" && grain === "premise" && (unmappedPct ?? 0) > 0;
   return (
     <div className="map-legend">
       <div className="map-legend-title">
         {layer.label}
-        {layer.unitNote && <span className="map-legend-sub"> · {layer.unitNote}</span>}
+        {effectiveUnitNote && <span className="map-legend-sub"> · {effectiveUnitNote}</span>}
       </div>
       <div className="legend-bar" style={{ background: `linear-gradient(to right, ${gradient})` }} />
       <div className="legend-axis">
         <span>{fmtNum(minVal, 1)}{axisUnit}</span>
         <span>{fmtNum(maxVal, 1)}{axisUnit}</span>
       </div>
+      {showCustomerAttributedNote && (
+        <div className="map-legend-foot">Always per customer — complaints aren’t re-scoped to {grain === "premise" ? "premises" : "accounts"}</div>
+      )}
+      {showUnmappedNote && (
+        <div className="map-legend-foot">~{unmappedPct}% of complaints in view couldn’t be pinned to a specific address</div>
+      )}
     </div>
   );
 }
@@ -2760,7 +3166,7 @@ interface GroupSampleRow {
 interface GroupAnalytics {
   n: number;
   total?: number;
-  // Same cohort at customer grain (entity-grain §4.4) — `total` is service
+  // Same cohort at customer grain — `total` is service
   // locations (the default unit); this collapses multi-site customers to one.
   distinctCustomers?: number;
   // Same cohort at owner grain — a chain or landlord's premises
@@ -2806,7 +3212,7 @@ function ServerDist({ label, buckets, total }: { label: string; buckets?: GroupD
 // keyed on the session cohort, so it works at any zoom with no loaded dots.
 // ────────────────────────────────────────────────────────────────────
 function FocusPanel({
-  data, loading, focusActive, label, unit, onUnitChange, onSelectCustomer, onSelectPremise, onSelectOwner, program,
+  data, loading, focusActive, label, grain, onSelectCustomer, onSelectPremise, program,
 }: {
   // Group analytics + loading come from the parent's useGroupAnalytics, the same
   // source feeding the top context bar — so the count reveals in lockstep here.
@@ -2814,14 +3220,11 @@ function FocusPanel({
   loading: boolean;
   focusActive: boolean;
   label: string | null;
-  // The counting unit (entity-grain §6.4) — drives the headline and which
-  // subject a row in the sample list drills into. "owner"
-  // (bridge_premise_owner) collapses a chain/landlord's premises to one row.
-  unit: CountUnit;
-  onUnitChange: (u: CountUnit) => void;
+  // The master grain from the top-level selector — drives the headline and
+  // which subject a rail row drills into.
+  grain: Grain;
   onSelectCustomer: (id: string) => void;
   onSelectPremise: (premiseNumber: string) => void;
-  onSelectOwner: (ownerNumber: string) => void;
   program?: { programId: string; derLabel: string | null } | null;
 }) {
   const eyebrow = focusActive ? (label || "Focus group") : "Service territory";
@@ -2844,14 +3247,17 @@ function FocusPanel({
   const n = data.n || 0;
   const total = data.total ?? n;
   const distinctCustomers = data.distinctCustomers ?? total;
-  const distinctOwners = data.distinctOwners ?? total;
-  // The headline follows the selected unit; the secondary line shows the
-  // premise count whenever it diverges (the 97.5% single-site case would
-  // just repeat the headline — entity-grain §4.4). Premise is always the
-  // secondary reference point (the map's own atom), even in owner mode.
-  const primaryCount = unit === "customer" ? distinctCustomers : unit === "owner" ? distinctOwners : total;
-  const secondaryCount = unit === "premise" ? distinctCustomers : total;
-  const secondaryUnit: CountUnit = unit === "premise" ? "customer" : "premise";
+  // Headline follows the master grain. Account grain maps to distinctCustomers
+  // (accounts ≈ customers in the current analytics model; a dedicated
+  // distinctAccounts from the server can be added when needed).
+  const primaryCount = grain === "customer" ? distinctCustomers : total;
+  // Secondary line: show premise count when grain isn't premise and it diverges.
+  const secondaryCount = total;
+  const secondaryUnit: CountUnit = "premise";
+  const grainUnit: CountUnit = grain === "customer" ? "customer" : "premise";
+  // Multi-highlight hint: shown when Customer grain lights >1 premise so the
+  // user who wanted a single location knows to switch grain.
+  const showGrainHint = focusActive && grain === "customer" && distinctCustomers < total;
   const iss = data.issues;
   const pct = (c: number) => (n > 0 ? Math.round((c / n) * 100) : 0);
 
@@ -2888,35 +3294,28 @@ function FocusPanel({
             {eyebrow}
             {loading && <span className="rail-updating"><span className="rail-spinner" />Updating…</span>}
           </div>
-          {/* Cohort counting-unit lens (entity-grain §6.4) — sets which unit
-              the headline reports and which subject a rail drill opens by
-              default. "Owner" (bridge_premise_owner) collapses a
-              chain/landlord's premises to the owning party. */}
-          <div className="focus-unit-toggle" title="Count this focus group by premise, customer, or owner">
-            <span className="map-select-label">Count by</span>
-            {(["premise", "customer", "owner"] as const).map((u) => (
-              <button
-                key={u}
-                type="button"
-                className={`map-select-btn ${unit === u ? "active" : ""}`}
-                onClick={() => onUnitChange(u)}
-              >
-                {u === "premise" ? "Premises" : u === "customer" ? "Customers" : "Owners"}
-              </button>
-            ))}
-          </div>
-          <h3>{formatUnitCount(fmtNum(primaryCount), primaryCount, unit)}</h3>
+          <h3>{formatUnitCount(fmtNum(primaryCount), primaryCount, grainUnit)}</h3>
           <div className="subtle">
             {fmtNum(data.residential ?? 0)} residential · {fmtNum(data.commercial ?? 0)} commercial
             {data.truncated ? " · sampled" : ""}
-            {/* Only worth a line when it diverges — the 97.5% single-site case
-                would just repeat the headline (entity-grain §4.4). */}
-            {secondaryCount !== primaryCount && (
+            {/* Show premise count as secondary when grain isn't premise and they diverge. */}
+            {grain !== "premise" && secondaryCount !== primaryCount && (
               <> · {formatUnitCount(fmtNum(secondaryCount), secondaryCount, secondaryUnit)}</>
             )}
           </div>
         </div>
       </div>
+      {/* Grain hint: Customer grain lights every premise for the cohort's customers,
+          including locations outside any area you drew or clicked. */}
+      {showGrainHint && (
+        <div className="grain-hint">
+          {distinctCustomers === 1
+            ? <>Showing all {fmtNum(total)} premises for this customer.{" "}</>
+            : <>Customer grain: showing all {fmtNum(total)} premises for these {fmtNum(distinctCustomers)} customers — including locations outside the area you selected.{" "}</>
+          }
+          Switch to <strong>Premise</strong> grain above to focus only on the selected area.
+        </div>
+      )}
 
       {vitals.length > 0 && (
         <div className="group-vitals">
@@ -2993,58 +3392,31 @@ function FocusPanel({
         </div>
       </Section>
 
-      {unit === "owner" ? (
-        // Owner mode dedupes the (per-account) sample rows down to one per
-        // owning party — several premises legitimately share an owner (a
-        // chain or the landlord hero), and the list should show owners, not
-        // repeat the same one. Rows with no owner on file are dropped rather
-        // than shown as a misleading blank.
-        (() => {
-          const seen: Record<string, GroupSampleRow> = {};
-          for (const c of sample) if (c.owner_number && !seen[c.owner_number]) seen[c.owner_number] = c;
-          const owners = Object.values(seen);
-          return (
-            <Section title="Owners" subtitle={distinctOwners > owners.length ? `top ${fmtNum(owners.length)} of ${fmtNum(distinctOwners)}` : fmtNum(owners.length)}>
-              <ul className="cell-customer-list">
-                {owners.map((c) => (
-                  <li
-                    key={c.owner_number as string}
-                    className="cell-customer-row"
-                    onClick={() => onSelectOwner(c.owner_number as string)}
-                    title="Drill into this owner"
-                  >
-                    <div className="name">{c.owner_display_name || `Owner ${shortId(c.owner_number as string)}`}</div>
-                    <div className="meta">{c.customer_class} · premise sampled from this owner's portfolio</div>
-                  </li>
-                ))}
-              </ul>
-            </Section>
-          );
-        })()
-      ) : (
-        <Section title={unit === "premise" ? "Premises" : "Customers"} subtitle={total > sample.length ? `top ${fmtNum(sample.length)} of ${fmtNum(total)}` : fmtNum(sample.length)}>
-          <ul className="cell-customer-list">
-            {sample.map((c) => (
-              <li
-                key={c.account_number}
-                className="cell-customer-row"
-                onClick={() => (unit === "premise" ? onSelectPremise(c.premise_number) : onSelectCustomer(c.account_number))}
-                title={unit === "premise" ? "Drill into this premise" : "Drill into this customer"}
-              >
-                <div className="name">Account {shortId(c.account_number)}</div>
-                <div className="meta">{c.customer_class} · {c.engagement_tier} eng · {c.usage_band} use</div>
-                <div className="badges">
-                  {c.payment_stressed_flag && <span className="badge alert">Payment stress</span>}
-                  {c.churn_risk_band === "high" && <span className="badge alert">Dissatisfied</span>}
-                  {c.critical_care_flag && <span className="badge info">Critical care</span>}
-                  {num(c.recent_complaint_count_90d) >= 2 && <span className="badge warn">{c.recent_complaint_count_90d} complaints</span>}
-                  {num(c.recent_outage_minutes_90d) > 240 && <span className="badge warn">Outages</span>}
-                </div>
-              </li>
-            ))}
-          </ul>
-        </Section>
-      )}
+      <Section
+        title={grain === "premise" ? "Premises" : "Customers"}
+        subtitle={total > sample.length ? `top ${fmtNum(sample.length)} of ${fmtNum(total)}` : fmtNum(sample.length)}
+      >
+        <ul className="cell-customer-list">
+          {sample.map((c) => (
+            <li
+              key={c.account_number}
+              className="cell-customer-row"
+              onClick={() => (grain === "premise" ? onSelectPremise(c.premise_number) : onSelectCustomer(c.account_number))}
+              title={grain === "premise" ? "Drill into this premise" : "Drill into this customer"}
+            >
+              <div className="name">Account {shortId(c.account_number)}</div>
+              <div className="meta">{c.customer_class} · {c.engagement_tier} eng · {c.usage_band} use</div>
+              <div className="badges">
+                {c.payment_stressed_flag && <span className="badge alert">Payment stress</span>}
+                {c.churn_risk_band === "high" && <span className="badge alert">Dissatisfied</span>}
+                {c.critical_care_flag && <span className="badge info">Critical care</span>}
+                {num(c.recent_complaint_count_90d) >= 2 && <span className="badge warn">{c.recent_complaint_count_90d} complaints</span>}
+                {num(c.recent_outage_minutes_90d) > 240 && <span className="badge warn">Outages</span>}
+              </div>
+            </li>
+          ))}
+        </ul>
+      </Section>
     </aside>
   );
 }
@@ -3078,11 +3450,11 @@ function ProgramSection({
   onSelectCustomer: (id: string) => void;
 }) {
   const params = useMemo(() => ({ program_id: sql.string(programId) }), [programId]);
-  const kpisQ = useAnalyticsQuery<ProgramKpisRow>("mkt_program_kpis", params);
-  const targetsQ = useAnalyticsQuery<CampaignTargetRow>("mkt_recommended_targets", params);
-  const monthlyQ = useAnalyticsQuery<EnrollMonthlyRow>("mkt_enrollment_monthly", {});
-  const kpis = (kpisQ.data as ProgramKpisRow[] | undefined)?.[0];
-  const targets = (targetsQ.data as CampaignTargetRow[] | undefined) || [];
+  const kpisQ = useC360Query<ProgramKpisRow>("mkt_program_kpis", params);
+  const targetsQ = useC360Query<CampaignTargetRow>("mkt_recommended_targets", params);
+  const monthlyQ = useC360Query<EnrollMonthlyRow>("mkt_enrollment_monthly", {});
+  const kpis = rows(kpisQ.data)[0];
+  const targets = rows(targetsQ.data);
 
   // Group-scoped adoption from the dots already loaded (carry is_enrolled /
   // has_der only when a program lens is active). Null for groups without flags.
@@ -3099,8 +3471,7 @@ function ProgramSection({
   }, [customers]);
 
   const trend = useMemo(() => {
-    const rows = (monthlyQ.data as EnrollMonthlyRow[] | undefined) || [];
-    return rows.filter((r) => r.program_id === programId)
+    return rows(monthlyQ.data).filter((r) => r.program_id === programId)
       .map((r) => ({ month: r.year_month, n: num(r.n_enrolled) }))
       .sort((a, b) => a.month.localeCompare(b.month));
   }, [monthlyQ.data, programId]);
@@ -3213,8 +3584,7 @@ function ChatAnswer({ turn }: { turn: GenieTurn }) {
   // commercial customer paints a dot on every site, see enrichCustomers()),
   // so it matches the map dots and the rail headline. The distinct-customer
   // count is derived from the same rows (not turn.count, which is Genie's raw
-  // customer_id count) so the sentence always agrees with what's on screen —
-  // see ask-the-map-count-grain-design.md.
+  // customer_id count) so the sentence always agrees with what's on screen.
   const premiseCount = customers?.length ?? 0;
   const customerCount = customers ? new Set(customers.map((c) => c.customer_id)).size : 0;
   const grainsDiverge = matched && customerCount !== premiseCount;
@@ -3257,222 +3627,3 @@ function ChatAnswer({ turn }: { turn: GenieTurn }) {
   );
 }
 
-// ────────────────────────────────────────────────────────────────────
-// Customer drill-down panel — inline per-customer detail for the exec.
-// Reuses the customer detail queries so clicking a dot opens that customer's
-// complaints + analytics in the right rail, without leaving the map.
-// ────────────────────────────────────────────────────────────────────
-
-interface DrillHeaderRow {
-  account_number: string;
-  premise_number: string;
-  service_address: string; service_city: string; service_state: string; service_zip: string;
-  county: string;
-  customer_class: string;
-  building_subtype: string; sqft: number; year_built: number;
-  customer_since_date: string;
-  engagement_tier: string; digital_adoption_score: number;
-  churn_risk_band: string;
-  payment_stressed_flag: boolean; payment_late_flag: boolean; high_user_flag: boolean;
-  critical_care_flag: boolean; liheap_eligible: boolean;
-  avg_monthly_kwh_12mo: number; peer_p75_avg_monthly_kwh: number;
-  recent_outage_minutes_90d: number; recent_outage_events_90d: number;
-  recent_complaint_count_90d: number;
-  rate_display_name: string; account_status: string;
-  complaint_risk_pct: number | null; complaint_risk_tier: string | null;
-  complaint_risk_category: string | null;
-}
-interface DrillComplaintRow {
-  complaint_id: string; complaint_date: string; channel: string;
-  category: string; sub_category: string; severity: string;
-  sentiment_label: string; resolution_status: string;
-  verbatim_text: string; verbatim_language: string;
-}
-interface DrillOutageRow {
-  impact_id: string; affected_start: string; minutes_out: number;
-  cause_code: string; weather_category: string;
-  is_major_event_day: boolean; priority_restoration_flag: boolean;
-}
-interface DrillRecoRow {
-  program_id: string; program_name: string; program_type: string;
-  rebate_amount_usd: number; avg_annual_kwh_saved: number; relevance_score: number;
-}
-
-function CustomerDrillPanel({
-  accountNumber, onClose, onOpenFull, onPivot, backToGroup = false,
-}: {
-  accountNumber: string;
-  onClose: () => void;
-  onOpenFull: (subject: InspectorSubject) => void;
-  onPivot: (subject: InspectorSubject) => void;
-  // When this individual was drilled from inside a group, closing returns to
-  // that group — so the affordance reads "← Group" instead of a bare ×.
-  backToGroup?: boolean;
-}) {
-  const closeBtn = backToGroup
-    ? <button className="cell-back" onClick={onClose} title="Back to the group">← Group</button>
-    : <button className="cell-close" onClick={onClose}>×</button>;
-  const params = useMemo(() => ({ account_number: sql.string(accountNumber) }), [accountNumber]);
-  const header = useAnalyticsQuery<DrillHeaderRow>("customer_header", params);
-  const complaints = useAnalyticsQuery<DrillComplaintRow>("customer_complaints", params);
-  const outages = useAnalyticsQuery<DrillOutageRow>("customer_outages", params);
-  const recos = useAnalyticsQuery<DrillRecoRow>("customer_recommendations", params);
-
-  if (header.loading || (header.data || []).length === 0) {
-    return (
-      <aside className="cell-drill">
-        <div className="cell-drill-header">
-          <h3>{header.loading ? "Loading customer…" : "Customer not found"}</h3>
-          {closeBtn}
-        </div>
-      </aside>
-    );
-  }
-
-  const c = (header.data as DrillHeaderRow[])[0];
-  const cmp = (complaints.data || []) as DrillComplaintRow[];
-  const out = (outages.data || []) as DrillOutageRow[];
-  const recoList = (recos.data || []) as DrillRecoRow[];
-
-  // Compact "what matters about this customer" flag row.
-  const alerts: { tone: string; text: string }[] = [];
-  if (bool(c.payment_stressed_flag)) alerts.push({ tone: "alert", text: "Payment stress" });
-  if (c.complaint_risk_tier === "high") alerts.push({ tone: "alert", text: `Complaint risk ${c.complaint_risk_pct}%` });
-  else if (c.complaint_risk_tier === "elevated") alerts.push({ tone: "warn", text: `Complaint risk ${c.complaint_risk_pct}%` });
-  if (c.churn_risk_band === "high") alerts.push({ tone: "alert", text: "Dissatisfaction risk" });
-  if (bool(c.critical_care_flag)) alerts.push({ tone: "info", text: "Critical-care medical" });
-  if (bool(c.liheap_eligible)) alerts.push({ tone: "info", text: "LIHEAP-eligible" });
-  if (bool(c.high_user_flag)) alerts.push({ tone: "warn", text: "High usage" });
-  if (num(c.recent_outage_minutes_90d) > 240) alerts.push({ tone: "warn", text: "Heavy outages" });
-  if (bool(c.payment_late_flag)) alerts.push({ tone: "warn", text: "Paid late" });
-
-  const peerP75 = num(c.peer_p75_avg_monthly_kwh);
-  const usagePct = peerP75 > 0 ? Math.round((num(c.avg_monthly_kwh_12mo) / peerP75) * 100) : null;
-
-  return (
-    <aside className="cell-drill">
-      <div className="cell-drill-header">
-        <div>
-          <div className="cell-drill-eyebrow">Customer drill-down</div>
-          <h3>{c.service_address}</h3>
-          <div className="subtle">
-            {localityText({ city: c.service_city, county: c.county, state: c.service_state })} · {c.customer_class}
-          </div>
-          <div className="subtle">
-            {(c.building_subtype || "").replace(/_/g, " ")} · {fmtNum(c.sqft)} sqft · {c.rate_display_name}
-          </div>
-        </div>
-        {closeBtn}
-      </div>
-
-      <PivotChips
-        subject={{ kind: "customer", accountNumber }}
-        locationLabel={c.service_address}
-        premiseNumber={c.premise_number}
-        onPivot={onPivot}
-      />
-
-      {alerts.length > 0 && (
-        <div className="drill-flags">
-          {alerts.map((a, i) => <span key={i} className={`badge ${a.tone}`}>{a.text}</span>)}
-        </div>
-      )}
-
-      <div className="card cell-drill-section">
-        <h4>Key signals</h4>
-        <div className="delta-grid">
-          <div className="delta-row">
-            <div className="delta-label">Avg monthly use</div>
-            <div className="delta-value">{fmtKwh(c.avg_monthly_kwh_12mo)}</div>
-            <div className={`delta-comp ${usagePct != null && usagePct > 110 ? "tone-bad" : "tone-neutral"}`}>
-              {usagePct != null ? `${usagePct}% of peer p75` : "—"}
-            </div>
-          </div>
-          <div className="delta-row">
-            <div className="delta-label">Digital adoption</div>
-            <div className="delta-value">{fmtNum(c.digital_adoption_score)}/100</div>
-            <div className="delta-comp tone-neutral">{c.engagement_tier} engagement</div>
-          </div>
-          <div className="delta-row">
-            <div className="delta-label">Outages (90d)</div>
-            <div className="delta-value">{fmtNum(c.recent_outage_events_90d)} events</div>
-            <div className="delta-comp tone-neutral">{fmtNum(c.recent_outage_minutes_90d)} min out</div>
-          </div>
-          <div className="delta-row">
-            <div className="delta-label">Complaints (90d)</div>
-            <div className="delta-value">{fmtNum(c.recent_complaint_count_90d)}</div>
-            <div className="delta-comp tone-neutral">{c.account_status}</div>
-          </div>
-        </div>
-      </div>
-
-      <div className="card cell-drill-section">
-        <h4>Complaints ({cmp.length})</h4>
-        {complaints.loading ? (
-          <div className="loading">Loading…</div>
-        ) : cmp.length === 0 ? (
-          <div className="subtle">No complaints on file.</div>
-        ) : (
-          cmp.map((r) => (
-            <div className="complaint-card" key={r.complaint_id}>
-              <div className="meta">
-                <span>{fmtDate(r.complaint_date)}</span>
-                <span>·</span>
-                <span>{r.category} / {r.sub_category.replace(/_/g, " ")}</span>
-                <span className={`badge ${r.severity === "high" ? "alert" : r.severity === "medium" ? "warn" : "neutral"}`}>{r.severity}</span>
-                <span className={`badge ${r.resolution_status === "resolved" ? "good" : r.resolution_status === "escalated" ? "alert" : "neutral"}`}>{r.resolution_status}</span>
-              </div>
-              <div className="verbatim">"{r.verbatim_text}"</div>
-            </div>
-          ))
-        )}
-      </div>
-
-      <div className="card cell-drill-section">
-        <h4>Outage history ({out.length})</h4>
-        {outages.loading ? (
-          <div className="loading">Loading…</div>
-        ) : out.length === 0 ? (
-          <div className="subtle">No outages recorded.</div>
-        ) : (
-          <ul className="theme-list">
-            {out.slice(0, 8).map((r) => {
-              const mins = num(r.minutes_out);
-              const h = Math.floor(mins / 60), m = mins % 60;
-              return (
-                <li key={r.impact_id}>
-                  <span className="theme-name">{fmtDate(r.affected_start)} · {r.cause_code.replace(/_/g, " ")}</span>
-                  <span className="theme-count">{h > 0 ? `${h}h ${m}m` : `${m}m`}</span>
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </div>
-
-      <div className="card cell-drill-section">
-        <h4>Best-fit programs</h4>
-        {recos.loading ? (
-          <div className="loading">Loading…</div>
-        ) : recoList.length === 0 ? (
-          <div className="subtle">No matching programs for this segment.</div>
-        ) : (
-          <ul className="theme-list">
-            {recoList.slice(0, 4).map((r) => (
-              <li key={r.program_id}>
-                <span className="theme-name">{r.program_name}</span>
-                <span className="theme-count">{fmtUSD(r.rebate_amount_usd)}</span>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-
-      <div className="selection-actions">
-        <button className="sel-action primary" onClick={() => onOpenFull({ kind: "customer", accountNumber })}>
-          Expand full profile →
-        </button>
-      </div>
-    </aside>
-  );
-}

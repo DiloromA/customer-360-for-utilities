@@ -15,6 +15,10 @@
 dbutils.widgets.text("catalog", "main")
 dbutils.widgets.text("schema", "customer_360")
 dbutils.widgets.text("as_of_date", "2018-12-31")
+# "false" on a governed workspace whose UC tag policy rejects our tag values
+#. When false, the metric views are still created with all
+# column `comment:`s; only the `demo`/`standard`/`kpi` UC tags below are skipped.
+dbutils.widgets.text("apply_data_asset_tags", "true")
 
 import re
 
@@ -37,6 +41,7 @@ def _check_date(value, label):
 catalog = _check_id(dbutils.widgets.get("catalog").strip(), "catalog")
 schema = _check_id(dbutils.widgets.get("schema").strip(), "schema")
 as_of_date = _check_date(dbutils.widgets.get("as_of_date").strip(), "as_of_date")
+APPLY_TAGS = dbutils.widgets.get("apply_data_asset_tags").strip().lower() == "true"
 
 spark.sql(f"USE CATALOG `{catalog}`")
 spark.sql(f"USE SCHEMA `{schema}`")
@@ -49,7 +54,7 @@ print(f"Creating metric views in {catalog}.{schema}")
 # MAGIC ## Helper views
 # MAGIC
 # MAGIC `v_reliability_base` bakes the served-customer denominator (territory
-# MAGIC and county customer counts, off the current-occupancy bridge) onto
+# MAGIC and county customer counts, off the current-tenancy bridge) onto
 # MAGIC the outage-impact fact as constant columns, so SAIDI/SAIFI can be
 # MAGIC computed as `SUM(...) / MAX(...)` inside a metric view — which cannot
 # MAGIC otherwise reach a second fact at query time. It tracks the current
@@ -239,8 +244,7 @@ measures:
 """,
     # ────────────────────────────────────────────────────────────────
     # IEEE 1366-2022 reliability measures with a real served-customer
-    # denominator (v_reliability_base; see
-    # docs/metric-views-foundation-design.md §4). County comes baked onto
+    # denominator (v_reliability_base). County comes baked onto
     # v_reliability_base, which needs it for the county denominator anyway.
     "metric_reliability": f"""
 version: 1.1
@@ -403,8 +407,8 @@ dimensions:
     expr: dim_account.rate_category
     comment: "Residential vs Commercial rate category (dim_account.rate_category)."
   - name: County
-    expr: (SELECT MAX(p.county) FROM {catalog}.{schema}.dim_premise p WHERE p.premise_id = dim_account.premise_id)
-    comment: "Service county of the account's premise (dim_account.premise_id resolved against dim_premise)."
+    expr: (SELECT MAX(p.county) FROM {catalog}.{schema}.account_current_premise acp JOIN {catalog}.{schema}.dim_premise p ON p.premise_id = acp.premise_id WHERE acp.account_id = dim_account.account_id)
+    comment: "Service county of the account's current premise (via account_current_premise seam)."
   - name: Account Tenure Band
     expr: dim_account.account_tenure_band
     comment: "Account age band as of {as_of_date}: new_<1yr | 1-3yr | 3-10yr | 10+yr."
@@ -486,7 +490,7 @@ measures:
     "metric_dsm_uptake": f"""
 version: 1.1
 source: {catalog}.{schema}.fact_program_enrollment
-comment: "DSM/EE program uptake metrics. Enrollment counts, completion rates, rebates paid, and kWh savings realized. Drives the EE marketing portfolio view and CCO EE penetration tile. EM&V participation rate (enrolled / eligible) is a cross-metric-view calculation: this view's Distinct Customers Enrolled divided by metric_customer_base's Service Locations Served for the matching segment — not modeled here since the eligible denominator lives on the customer base, not the enrollment fact."
+comment: "DSM/EE program uptake metrics. Enrollment counts, completion rates, rebates paid, and kWh savings realized. Drives the EE marketing portfolio view and CCO EE penetration tile. GRAIN: fact_program_enrollment is one row per (customer, program, premise) — every program is a physical install/service, so the per-record measures (Enrollment Count, Total Rebates Paid, kWh saved) count actual installs; a multi-site customer contributes one per site. EM&V participation rate (enrolled / eligible) is a cross-metric-view calculation: divide either Distinct Premises Enrolled by metric_customer_base's Service Locations Served (premise-over-premise, matching grains) or Distinct Customers Enrolled by its customer count — the eligible denominator lives on the customer base, not the enrollment fact."
 joins:
   - name: dim_program
     source: {catalog}.{schema}.dim_program
@@ -528,7 +532,10 @@ measures:
     comment: "Total enrollment records."
   - name: Distinct Customers Enrolled
     expr: COUNT(DISTINCT source.customer_id)
-    comment: "Distinct customers enrolled — the numerator of EM&V participation rate."
+    comment: "Distinct customers enrolled — the customer-grain numerator of EM&V participation rate."
+  - name: Distinct Premises Enrolled
+    expr: COUNT(DISTINCT source.premise_id)
+    comment: "Distinct premises enrolled — the premise-grain numerator of EM&V participation rate (matches metric_customer_base's Service Locations Served denominator)."
   - name: Active Count
     expr: SUM(CASE WHEN source.enrollment_status = 'active' THEN 1 ELSE 0 END)
     comment: "Enrollments currently in active status."
@@ -555,7 +562,7 @@ measures:
     "metric_relationships": f"""
 version: 1.1
 source: {catalog}.{schema}.bridge_account_premise
-comment: "Customer<->account<->premise relationship lifecycle metrics off the effective-dated occupancy bridge: move-ins, move-outs (turnover), tenure, and current occupancy, sliceable by geography, building type, and customer class. Tenure = days link_start_date -> link_end_date (open links measured to the {as_of_date} as-of date). Rate-switch history lives in dim_service_agreement (not modeled here)."
+comment: "Customer<->account<->premise relationship lifecycle metrics off the effective-dated tenancy bridge: move-ins, move-outs (turnover), tenure, and current tenancy, sliceable by geography, building type, and customer class. Tenure = days link_start_date -> link_end_date (open links measured to the {as_of_date} as-of date). Rate-switch history lives in dim_service_agreement (not modeled here)."
 joins:
   - name: dim_customer
     source: {catalog}.{schema}.dim_customer
@@ -564,24 +571,24 @@ joins:
     source: {catalog}.{schema}.dim_premise
     on: source.premise_id = dim_premise.premise_id
 dimensions:
-  - name: Occupancy Type
-    expr: source.occupancy_type
+  - name: Tenancy Type
+    expr: source.tenancy_type
     comment: "How the account occupies the premise (e.g. owner, tenant)."
   - name: Link Status
     expr: source.link_status
-    comment: "Current status of the occupancy link."
+    comment: "Current status of the tenancy link."
   - name: Is Current
     expr: source.is_current
-    comment: "True for the live occupancy link; false for a closed prior-occupant link."
+    comment: "True for the live tenancy link; false for a closed prior-customer link."
   - name: Move In Year
     expr: YEAR(source.link_start_date)
-    comment: "Calendar year the occupancy link began."
+    comment: "Calendar year the tenancy link began."
   - name: Move Out Year
     expr: YEAR(source.link_end_date)
-    comment: "Calendar year the occupancy link ended (NULL for open/current links)."
+    comment: "Calendar year the tenancy link ended (NULL for open/current links)."
   - name: Termination Reason
     expr: source.link_termination_reason
-    comment: "Why the occupancy link ended, when it has."
+    comment: "Why the tenancy link ended, when it has."
   - name: County
     expr: dim_premise.county
     comment: "Service county of the premise."
@@ -594,7 +601,7 @@ dimensions:
 measures:
   - name: Relationship Count
     expr: COUNT(1)
-    comment: "Total occupancy-link rows (both current and historical)."
+    comment: "Total tenancy-link rows (both current and historical)."
   - name: Distinct Customers
     expr: COUNT(DISTINCT source.customer_id)
     comment: "Distinct customers appearing in the sliced links."
@@ -609,16 +616,16 @@ measures:
     comment: "Ended links — move-outs / tenant turnover."
   - name: Turnover Rate
     expr: SUM(CASE WHEN source.link_end_date IS NOT NULL THEN 1.0 ELSE 0.0 END) / NULLIF(COUNT(1), 0)
-    comment: "Share of occupancy links that have ended (turned over)."
-  - name: Current Occupancy Count
+    comment: "Share of tenancy links that have ended (turned over)."
+  - name: Current Customer Count
     expr: SUM(CASE WHEN source.is_current THEN 1 ELSE 0 END)
-    comment: "Links representing the live, current occupant."
+    comment: "Links representing the live, current customer."
   - name: Avg Tenure Days
     expr: AVG(DATEDIFF(COALESCE(source.link_end_date, DATE'{as_of_date}'), source.link_start_date))
-    comment: "Average occupancy tenure in days; open links measured to the {as_of_date} as-of date."
+    comment: "Average tenancy tenure in days; open links measured to the {as_of_date} as-of date."
   - name: Median Tenure Days
     expr: MEDIAN(DATEDIFF(COALESCE(source.link_end_date, DATE'{as_of_date}'), source.link_start_date))
-    comment: "Median occupancy tenure in days — robust to the long tail of very-long-tenure links that skews the average."
+    comment: "Median tenancy tenure in days — robust to the long tail of very-long-tenure links that skews the average."
 """,
     # ────────────────────────────────────────────────────────────────
     # New. The keystone denominator view: every "% of customers" KPI in the
@@ -680,22 +687,22 @@ measures:
     comment: "Current customer base at entity grain — multi-site customers collapse to one. Differs from Service Locations Served when a customer occupies multiple premises."
   - name: Payment Stressed Count
     expr: SUM(CASE WHEN dim_customer.payment_stressed_flag THEN 1 ELSE 0 END)
-    comment: "Service locations with a payment-stressed occupant."
+    comment: "Service locations with a payment-stressed customer."
   - name: Payment Stressed Rate
     expr: SUM(CASE WHEN dim_customer.payment_stressed_flag THEN 1.0 ELSE 0.0 END) / NULLIF(COUNT(1), 0)
     comment: "Share of the current customer base flagged payment-stressed."
   - name: Churn High Count
     expr: SUM(CASE WHEN dim_customer.churn_risk_band = 'high' THEN 1 ELSE 0 END)
-    comment: "Service locations with a high modeled churn-risk occupant."
+    comment: "Service locations with a high modeled churn-risk customer."
   - name: Churn High Rate
     expr: SUM(CASE WHEN dim_customer.churn_risk_band = 'high' THEN 1.0 ELSE 0.0 END) / NULLIF(COUNT(1), 0)
     comment: "Share of the current customer base flagged high churn risk."
   - name: Critical Care Count
     expr: SUM(CASE WHEN dim_customer.critical_care_flag THEN 1 ELSE 0 END)
-    comment: "Service locations with a critical-care registered occupant."
+    comment: "Service locations with a critical-care registered customer."
   - name: LIHEAP Eligible Count
     expr: SUM(CASE WHEN dim_customer.liheap_eligible THEN 1 ELSE 0 END)
-    comment: "Service locations with a LIHEAP-eligible occupant."
+    comment: "Service locations with a LIHEAP-eligible customer."
   - name: High Engagement Rate
     expr: SUM(CASE WHEN dim_customer.engagement_tier = 'high' THEN 1.0 ELSE 0.0 END) / NULLIF(COUNT(1), 0)
     comment: "Share of the current customer base in the high digital-engagement tier."
@@ -796,27 +803,33 @@ COLUMN_TAGS: dict[str, dict[str, dict[str, str]]] = {
     },
 }
 
-print("\nApplying UC tags to metric views...")
-for view_name in ALL_VIEWS:
-    full_name = f"`{catalog}`.`{schema}`.`{view_name}`"
-    try:
-        spark.sql(f"ALTER VIEW {full_name} UNSET TAGS ('managed_by', 'area', 'dir_name')")
-        tags = {"demo": "customer-360-for-utilities", **VIEW_TAGS.get(view_name, {})}
-        tag_clause = ", ".join(f"'{k}' = '{v}'" for k, v in tags.items())
-        spark.sql(f"ALTER VIEW {full_name} SET TAGS ({tag_clause})")
-        print(f"  ✓ {view_name} (object tags)")
-    except Exception as e:
-        print(f"  ✗ {view_name} (object tags): {e}")
-
-print("\nApplying UC column tags to named-KPI measures...")
-for view_name, columns in COLUMN_TAGS.items():
-    full_name = f"`{catalog}`.`{schema}`.`{view_name}`"
-    for column_name, tags in columns.items():
-        tag_clause = ", ".join(f"'{k}' = '{v}'" for k, v in tags.items())
+if not APPLY_TAGS:
+    print(
+        "\napply_data_asset_tags=false — skipping metric-view object + column "
+        "UC tags (governed workspace tag policy). All column comments already applied."
+    )
+else:
+    print("\nApplying UC tags to metric views...")
+    for view_name in ALL_VIEWS:
+        full_name = f"`{catalog}`.`{schema}`.`{view_name}`"
         try:
-            spark.sql(
-                f"ALTER TABLE {full_name} ALTER COLUMN `{column_name}` SET TAGS ({tag_clause})"
-            )
-            print(f"  ✓ {view_name}.`{column_name}`")
+            spark.sql(f"ALTER VIEW {full_name} UNSET TAGS ('managed_by', 'area', 'dir_name')")
+            tags = {"demo": "customer-360-for-utilities", **VIEW_TAGS.get(view_name, {})}
+            tag_clause = ", ".join(f"'{k}' = '{v}'" for k, v in tags.items())
+            spark.sql(f"ALTER VIEW {full_name} SET TAGS ({tag_clause})")
+            print(f"  ✓ {view_name} (object tags)")
         except Exception as e:
-            print(f"  ✗ {view_name}.`{column_name}`: {e}")
+            print(f"  ✗ {view_name} (object tags): {e}")
+
+    print("\nApplying UC column tags to named-KPI measures...")
+    for view_name, columns in COLUMN_TAGS.items():
+        full_name = f"`{catalog}`.`{schema}`.`{view_name}`"
+        for column_name, tags in columns.items():
+            tag_clause = ", ".join(f"'{k}' = '{v}'" for k, v in tags.items())
+            try:
+                spark.sql(
+                    f"ALTER TABLE {full_name} ALTER COLUMN `{column_name}` SET TAGS ({tag_clause})"
+                )
+                print(f"  ✓ {view_name}.`{column_name}`")
+            except Exception as e:
+                print(f"  ✗ {view_name}.`{column_name}`: {e}")

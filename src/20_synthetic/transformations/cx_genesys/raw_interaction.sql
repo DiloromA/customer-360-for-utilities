@@ -22,7 +22,7 @@ CREATE OR REFRESH MATERIALIZED VIEW raw_interaction (
   CONSTRAINT valid_media_type EXPECT (media_type IN ('voice','chat','email','sms')),
   CONSTRAINT valid_direction  EXPECT (direction IN ('inbound','outbound'))
 )
-COMMENT 'Interaction — Genesys Cloud-shaped contact center session export. ~200-300K rows over 2017+2018. Complaint-linked interactions plus routine inquiry traffic at 3-4x complaint volume (current occupants only; prior-occupant customers excluded, joined to the customer''s single primary account). PK: interaction_id. FK: customer_id -> raw_customer. complaint_id -> raw_customer_complaint_event when applicable.'
+COMMENT 'Interaction — Genesys Cloud-shaped contact center session export. ~200-300K rows over 2017+2018. Complaint-linked interactions plus routine inquiry traffic at 3-4x complaint volume (current customers only; prior-customer customers excluded, joined to the customer''s single primary account). PK: interaction_id. FK: customer_id -> raw_customer. complaint_id -> raw_customer_complaint_event when applicable.'
 AS
 
 WITH
@@ -91,7 +91,7 @@ customer_months AS (
    AND a.account_group IN ('standard','corporate_parent')   -- exactly one account per current customer (no chain fan-out)
   CROSS JOIN years y
   CROSS JOIN months m
-  WHERE NOT c.is_prior_occupant                              -- current occupants only
+  WHERE NOT c.is_prior_customer                              -- current customers only
 ),
 
 -- Inquiries per (customer, month). Base rate ~0.15 baseline, biased by archetype.

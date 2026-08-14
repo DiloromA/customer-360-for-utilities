@@ -18,7 +18,7 @@ CREATE OR REFRESH MATERIALIZED VIEW raw_qualtrics_response (
   CONSTRAINT non_null_customer_id  EXPECT (customer_id IS NOT NULL),
   CONSTRAINT valid_score           EXPECT (score >= 0 AND score <= 10)
 )
-COMMENT 'Qualtrics survey responses. NPS (quarterly relationship), CSAT (post-call transactional), and custom event-triggered surveys. NPS scores propagate archetype + recent outage / complaint exposure. ~5% of NPS responses include LLM-generated open-ended comment. NPS responses cover current occupants only (prior-occupant customers excluded). PK: response_id. FK: survey_id -> qualtrics_survey; customer_id -> raw_customer.'
+COMMENT 'Qualtrics survey responses. NPS (quarterly relationship), CSAT (post-call transactional), and custom event-triggered surveys. NPS scores propagate archetype + recent outage / complaint exposure. ~5% of NPS responses include LLM-generated open-ended comment. NPS responses cover current customers only (prior-customer customers excluded). PK: response_id. FK: survey_id -> qualtrics_survey; customer_id -> raw_customer.'
 AS
 
 WITH
@@ -48,7 +48,7 @@ nps_candidates AS (
   FROM raw_qualtrics_survey s
   CROSS JOIN ${customer_master_schema}.raw_customer c
   WHERE s.survey_type = 'nps_relationship'
-    AND NOT c.is_prior_occupant                                        -- current occupants only (no prior-occupant leakage into the current window)
+    AND NOT c.is_prior_customer                                        -- current customers only (no prior-customer leakage into the current window)
 ),
 
 nps_responding AS (

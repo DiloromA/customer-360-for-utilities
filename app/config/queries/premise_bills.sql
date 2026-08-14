@@ -1,9 +1,9 @@
 -- 24-month bill + usage chart data for this premise (address) — spans
--- occupants, since billed usage at a physical site persists across
+-- customers, since billed usage at a physical site persists across
 -- tenancy. Premise-native version of customer_bills.sql. fact_customer_billing
 -- carries only service_point_id (not premise_id directly), so join through
 -- dim_service_point to scope by premise. A large sub-metered commercial
--- premise (temporal-realism §5.3) has 2-5 service_points, so this
+-- premise has 2-5 service_points, so this
 -- legitimately returns multiple bill rows per month (one per meter) — only
 -- one of them carries previous_balance/total_amount_due's shared arrears
 -- (see raw_customer_billing.sql), so summing the column across a month's

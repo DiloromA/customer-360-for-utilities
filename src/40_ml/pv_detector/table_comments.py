@@ -6,6 +6,10 @@
 
 dbutils.widgets.text("catalog", "main")
 dbutils.widgets.text("schema", "customer_360")
+# "false" on a governed workspace whose UC tag policy rejects our tag values
+#. When false, all COMMENT ON TABLE/COLUMN still applies; only
+# the `demo` UC tag below is skipped. Mirrors databricks.yml data_asset_tags.
+dbutils.widgets.text("apply_data_asset_tags", "true")
 
 import re
 
@@ -20,6 +24,7 @@ def _check_id(value, label):
 
 catalog = _check_id(dbutils.widgets.get("catalog").strip(), "catalog")
 schema = _check_id(dbutils.widgets.get("schema").strip(), "schema")
+APPLY_TAGS = dbutils.widgets.get("apply_data_asset_tags").strip().lower() == "true"
 
 spark.sql(f"USE CATALOG `{catalog}`")
 spark.sql(f"USE SCHEMA `{schema}`")
@@ -96,12 +101,13 @@ for table_name, (table_comment, column_comments) in TABLE_COMMENTS.items():
         # COMMENT ON COLUMN works for both tables and (materialized) views;
         # ALTER TABLE ... ALTER COLUMN fails on views with EXPECT_TABLE_NOT_VIEW.
         spark.sql(f"COMMENT ON COLUMN {fqn}.`{col}` IS '{escaped}'")
-    try:
-        spark.sql(
-            f"ALTER TABLE {fqn} SET TAGS ('demo' = 'customer-360-for-utilities')"
-        )
-    except Exception as e:
-        print(f"  Tag failed for {fqn}: {e}")
+    if APPLY_TAGS:
+        try:
+            spark.sql(
+                f"ALTER TABLE {fqn} SET TAGS ('demo' = 'customer-360-for-utilities')"
+            )
+        except Exception as e:
+            print(f"  Tag failed for {fqn}: {e}")
     print(f"  Commented {fqn}")
 
 print("Done.")

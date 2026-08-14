@@ -3,9 +3,9 @@
 -- Only rows where the premise has that DER type appear.
 --
 -- GRAIN: DER is a PHYSICAL install on the premise (raw_der_customer is keyed to
--- the usage_point / premise, NOT the customer), so a multi-site commercial-chain
+-- the service point / premise, NOT the customer), so a multi-site commercial-chain
 -- customer gets independent DER per site. We therefore carry premise_id and the
--- durable customer_id (current occupant) — consumers scoping to a single premise
+-- durable customer_id (current customer) — consumers scoping to a single premise
 -- (the CSR right rail) MUST filter on premise_id, not customer_id, or the DER of
 -- a customer's other premises leaks in and fans the cards out.
 
@@ -22,7 +22,7 @@ CREATE OR REFRESH MATERIALIZED VIEW fact_der_adoption (
   CONSTRAINT fk_fda_customer FOREIGN KEY (customer_id) REFERENCES dim_customer (customer_id) NOT ENFORCED RELY,
   CONSTRAINT fk_fda_premise  FOREIGN KEY (premise_id)  REFERENCES dim_premise  (premise_id)  NOT ENFORCED RELY
 )
-COMMENT 'DER Adoption fact - normalized per (premise, device_type). Pivoted from the wide raw der_customer table. DER is a physical install on the premise, so premise_id is the physical grain (a multi-site customer gets independent DER per site); customer_id is the durable current-occupant key. Both are durable BIGINT keys.'
+COMMENT 'DER Adoption fact - normalized per (premise, device_type). Pivoted from the wide raw der_customer table. DER is a physical install on the premise, so premise_id is the physical grain (a multi-site customer gets independent DER per site); customer_id is the durable current-customer key. Both are durable BIGINT keys.'
 AS
 
 WITH base AS (
@@ -44,13 +44,6 @@ SELECT abs(xxhash64(customer_id)) AS customer_id, abs(xxhash64(premise_id)) AS p
   CAST(NULL AS DATE), pv_install_date, pv_system_kw_dc,
   pv_inverter_type, CAST(pv_net_metered AS STRING), current_timestamp()
 FROM base WHERE has_pv
-
-UNION ALL
-
-SELECT abs(xxhash64(customer_id)) AS customer_id, abs(xxhash64(premise_id)) AS premise_id, 'BESS',
-  CAST(NULL AS DATE), CAST(NULL AS DATE), bess_capacity_kwh,
-  bess_dispatch_mode, CAST(bess_power_kw AS STRING), current_timestamp()
-FROM base WHERE has_bess
 
 UNION ALL
 

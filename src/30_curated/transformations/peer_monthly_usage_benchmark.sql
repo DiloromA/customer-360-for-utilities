@@ -11,8 +11,8 @@
 -- like sites — matching the account-grained CSR header and load-profile views.
 --
 -- fact_meter_readings_monthly's grain includes service_point_id: a large
--- sub-metered commercial premise's 2-5 concurrent usage_points
--- (temporal-realism §5.3) each contribute their OWN row for the same
+-- sub-metered commercial premise's 2-5 concurrent service points
+-- each contribute their OWN row for the same
 -- account/month. account_monthly below sums them first, so the peer
 -- percentiles compare each site's TOTAL monthly kWh, not one meter's slice of
 -- it (which would silently deflate the whole peer group toward large
@@ -37,7 +37,7 @@ COMMENT 'Per-month kWh benchmark for each (peer_building_subtype, peer_sqft_band
 AS
 
 WITH account_monthly AS (
-  -- Sum across sibling service_points (usage_points) first, so a sub-metered
+  -- Sum across sibling service_points (service points) first, so a sub-metered
   -- premise's total monthly kWh — not one meter's share of it — is what
   -- lands in the peer distribution.
   SELECT

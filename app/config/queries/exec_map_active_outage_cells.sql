@@ -1,6 +1,6 @@
 -- Executive map — per-H3-cell "currently out of power" metrics for the
 -- Active outages (live) layer. One row per H3 cell at the requested resolution
--- within the viewport. n_customers is the cell's current-occupant base;
+-- within the viewport. n_customers is the cell's current-customer base;
 -- n_currently_out is how many of them are without power right now (from
 -- fact_active_outage_customer_impact); pct_currently_out drives the
 -- choropleth shade.
@@ -27,7 +27,7 @@ WITH premises_in_view AS (
     AND h3.longitude BETWEEN CAST(:west AS DOUBLE) AND CAST(:east AS DOUBLE)
 ),
 
--- Current occupant per premise (one row per premise) + whether THIS PREMISE is
+-- Current customer per premise (one row per premise) + whether THIS PREMISE is
 -- out now. Membership is keyed on premise_id, not customer_id: a customer can
 -- occupy several premises (commercial chains), and only the premises actually on
 -- a downed feeder are out — keying on customer_id would flag a chain's healthy

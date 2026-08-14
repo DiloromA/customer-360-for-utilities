@@ -2,7 +2,7 @@
 -- window. Split out from exec_map_cell_detail because ARRAY<STRUCT>
 -- columns get returned as JSON strings by the analytics plugin —
 -- separate scalar-column queries are simpler to consume.
--- Cell customers = current occupant per premise (bridge is_current).
+-- Cell customers = current customer per premise (bridge is_current).
 
 -- @param h3_index   STRING
 -- @param resolution INTEGER

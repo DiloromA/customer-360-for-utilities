@@ -15,7 +15,7 @@ CREATE OR REFRESH MATERIALIZED VIEW raw_critical_care_registration (
     'oxygen_concentrator','dialysis','ventilator','cpap','iv_pump','feeding_pump','other'
   ))
 )
-COMMENT 'Critical Care registration. One row per current customer with medical-equipment dependency on continuous power (prior-occupant customers excluded). Drives priority_restoration_flag in outage_customer_impact and the CSR view critical-care banner. PK: registration_id. FK: customer_id -> raw_customer.'
+COMMENT 'Critical Care registration. One row per current customer with medical-equipment dependency on continuous power (prior-customer customers excluded). Drives priority_restoration_flag in outage_customer_impact and the CSR view critical-care banner. PK: registration_id. FK: customer_id -> raw_customer.'
 AS
 
 WITH
@@ -24,7 +24,7 @@ flagged AS (
   SELECT customer_id, archetype, age_band_hoh, language_preference
   FROM ${customer_master_schema}.raw_customer
   WHERE critical_care_flag = true
-    AND NOT is_prior_occupant                                          -- current occupants only
+    AND NOT is_prior_customer                                          -- current customers only
 ),
 
 with_attrs AS (

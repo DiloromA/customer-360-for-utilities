@@ -12,7 +12,7 @@ CREATE OR REFRESH MATERIALIZED VIEW raw_liheap_enrollment (
   CONSTRAINT valid_status            EXPECT (benefit_status IN ('approved','pending','denied')),
   CONSTRAINT positive_benefit        EXPECT (benefit_amount_usd > 0 OR benefit_status != 'approved')
 )
-COMMENT 'LIHEAP enrollment. One row per (eligible current customer, program year); prior-occupant customers excluded. ~40% of liheap_eligible customers enroll each year. Drives compliance + vulnerable-customer reporting. PK: enrollment_id. FK: customer_id -> raw_customer.'
+COMMENT 'LIHEAP enrollment. One row per (eligible current customer, program year); prior-customer customers excluded. ~40% of liheap_eligible customers enroll each year. Drives compliance + vulnerable-customer reporting. PK: enrollment_id. FK: customer_id -> raw_customer.'
 AS
 
 WITH
@@ -21,7 +21,7 @@ eligible AS (
   SELECT customer_id, archetype, income_band, household_size, language_preference
   FROM ${customer_master_schema}.raw_customer
   WHERE liheap_eligible = true
-    AND NOT is_prior_occupant                                          -- current occupants only
+    AND NOT is_prior_customer                                          -- current customers only
 ),
 
 program_years AS (

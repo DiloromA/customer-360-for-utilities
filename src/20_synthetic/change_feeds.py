@@ -54,8 +54,8 @@ WITH base AS (
   SELECT
     customer_id, customer_type, n_premises_owned, customer_class, income_band,
     household_size, age_band_hoh, language_preference, tenure, liheap_eligible,
-    customer_since_date, critical_care_flag, is_prior_occupant,
-    (critical_care_flag AND NOT is_prior_occupant
+    customer_since_date, critical_care_flag, is_prior_customer,
+    (critical_care_flag AND NOT is_prior_customer
        AND abs(xxhash64(customer_id, 'cc_register', {seed})) % 100 < 50) AS cc_registered_midwindow,
     DATE_ADD(DATE'2017-01-01',
              CAST(abs(xxhash64(customer_id, 'cc_date', {seed})) % 700 AS INT)) AS cc_change_date
@@ -67,7 +67,7 @@ seed AS (
     household_size, age_band_hoh, language_preference, tenure, liheap_eligible,
     customer_since_date,
     CASE WHEN cc_registered_midwindow THEN false ELSE critical_care_flag END AS critical_care_flag,
-    is_prior_occupant,
+    is_prior_customer,
     CAST(customer_since_date AS TIMESTAMP) AS change_ts,
     'INSERT' AS operation
   FROM base
@@ -78,7 +78,7 @@ chg AS (
     household_size, age_band_hoh, language_preference, tenure, liheap_eligible,
     customer_since_date,
     true AS critical_care_flag,
-    is_prior_occupant,
+    is_prior_customer,
     CAST(cc_change_date AS TIMESTAMP) AS change_ts,
     'UPDATE' AS operation
   FROM base
@@ -86,13 +86,13 @@ chg AS (
 )
 SELECT customer_id, customer_type, n_premises_owned, customer_class, income_band,
        household_size, age_band_hoh, language_preference, tenure, liheap_eligible,
-       customer_since_date, critical_care_flag, is_prior_occupant, change_ts, operation,
+       customer_since_date, critical_care_flag, is_prior_customer, change_ts, operation,
        current_timestamp() AS _ingested_at
 FROM seed
 UNION ALL
 SELECT customer_id, customer_type, n_premises_owned, customer_class, income_band,
        household_size, age_band_hoh, language_preference, tenure, liheap_eligible,
-       customer_since_date, critical_care_flag, is_prior_occupant, change_ts, operation,
+       customer_since_date, critical_care_flag, is_prior_customer, change_ts, operation,
        current_timestamp() AS _ingested_at
 FROM chg
 """)
@@ -102,7 +102,7 @@ print("  raw_customer_changes:", spark.table("raw_customer_changes").count(), "r
 
 # account_changes — SEED row per account (baseline active at account_opened_date)
 # + an UPDATE row for accounts that later suspended/closed (live mid-window;
-# prior-occupant accounts just before the 2017 fact window).
+# prior-customer accounts just before the 2017 fact window).
 spark.sql(f"""
 CREATE OR REPLACE TABLE raw_account_changes AS
 WITH base AS (
@@ -110,8 +110,8 @@ WITH base AS (
     a.account_id, a.customer_id, a.premise_id, a.parent_account_id, a.account_group,
     a.customer_class, a.rate_schedule, a.autopay_enrolled, a.paperless_enrolled,
     a.marketing_consent, a.preferred_channel, a.account_opened_date, a.current_status,
-    c.is_prior_occupant,
-    (a.current_status IN ('suspended','closed') AND NOT c.is_prior_occupant) AS status_changed_midwindow,
+    c.is_prior_customer,
+    (a.current_status IN ('suspended','closed') AND NOT c.is_prior_customer) AS status_changed_midwindow,
     LEAST(DATE'{as_of}',
           DATE_ADD(a.account_opened_date,
                    CAST(90 + abs(xxhash64(a.account_id, 'status_date', {seed})) % 400 AS INT))) AS status_change_date
@@ -147,7 +147,7 @@ chg AS (
     CAST(DATE'2016-12-15' AS TIMESTAMP) AS change_ts,
     'UPDATE' AS operation
   FROM base
-  WHERE is_prior_occupant
+  WHERE is_prior_customer
 )
 SELECT account_id, customer_id, premise_id, parent_account_id, account_group,
        customer_class, rate_schedule, autopay_enrolled, paperless_enrolled,

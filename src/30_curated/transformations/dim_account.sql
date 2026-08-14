@@ -1,6 +1,6 @@
 -- Account dimension — the billing account, a first-class entity separate
 -- from the customer. ~58K rows (one per premise account + corporate
--- parents + prior-occupant closed accounts). customer -> account is 1:many
+-- parents + prior-customer closed accounts). customer -> account is 1:many
 -- (commercial chains hold many accounts under a corporate_parent).
 --
 -- KEYS: account_id is the durable BIGINT key (xxhash64 of the raw account
@@ -11,6 +11,10 @@
 -- NOTE: current_status here is the CURRENT account status. The Type-2 history
 -- of status transitions lives in dim_account_history (AUTO CDC SCD2).
 --
+-- Premise placement is NOT a column here: an account can move, so a dimension row
+-- must not imply an undated permanent placement. The dated history is in
+-- bridge_account_premise; account_current_premise is the current-state seam.
+--
 -- account_tenure_years/_band anchor to curated_demo_config.as_of_date, not a
 -- hardcoded date literal.
 
@@ -19,8 +23,6 @@ CREATE OR REFRESH MATERIALIZED VIEW dim_account (
   account_number       STRING NOT NULL,
   customer_id          BIGINT,
   customer_number      STRING,
-  premise_id           BIGINT,
-  premise_number       STRING,
   parent_account_id    BIGINT,
   account_group        STRING,
   customer_class       STRING,
@@ -36,18 +38,15 @@ CREATE OR REFRESH MATERIALIZED VIEW dim_account (
   account_tenure_years INT,
   account_tenure_band  STRING,
   _ingested_at         TIMESTAMP,
-  CONSTRAINT fk_da_customer FOREIGN KEY (customer_id) REFERENCES dim_customer (customer_id) NOT ENFORCED RELY,
-  CONSTRAINT fk_da_premise FOREIGN KEY (premise_id) REFERENCES dim_premise (premise_id) NOT ENFORCED RELY
+  CONSTRAINT fk_da_customer FOREIGN KEY (customer_id) REFERENCES dim_customer (customer_id) NOT ENFORCED RELY
 )
-COMMENT 'Account dimension. One row per billing account. account_id is the durable BIGINT key; account_number is the natural key the app searches and deep-links by. customer_id joins dim_customer; parent_account_id is the consolidated-billing parent. account_group: standard | consolidated_billing (a chain site account) | corporate_parent (the chain consolidated bill, premise/rate NULL). current_status is the present status; status-transition history lives in dim_account_history (SCD Type 2).'
+COMMENT 'Account dimension. One row per billing account. account_id is the durable BIGINT key; account_number is the natural key the app searches and deep-links by. customer_id joins dim_customer; parent_account_id is the consolidated-billing parent. account_group: standard | consolidated_billing (a chain site account) | corporate_parent (the chain consolidated bill, no premise assignment). Premise placement is dated and lives in bridge_account_premise; account_current_premise provides the current assignment. current_status is the present status; status-transition history lives in dim_account_history (SCD Type 2).'
 AS
 SELECT
   abs(xxhash64(a.account_id))                                              AS account_id,
   a.account_id                                                        AS account_number,
   abs(xxhash64(a.customer_id))                                             AS customer_id,
   a.customer_id                                                       AS customer_number,
-  CASE WHEN a.premise_id IS NOT NULL THEN abs(xxhash64(a.premise_id)) END  AS premise_id,
-  a.premise_id                                                        AS premise_number,
   CASE WHEN a.parent_account_id IS NOT NULL THEN abs(xxhash64(a.parent_account_id)) END AS parent_account_id,
   a.account_group,
   a.customer_class,

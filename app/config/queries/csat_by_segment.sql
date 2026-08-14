@@ -1,7 +1,7 @@
 -- CSAT view — Row 4a segmentation. Residential vs commercial, by county,
 -- and by account tenure band.
 --
--- Reads metric_csat (see docs/metric-views-foundation-design.md §8). County
+-- Reads metric_csat. County
 -- and Account Tenure Band come from the view; County resolves premise-aware
 -- through dim_account.premise_id inside the view. Filters on
 -- `Interaction Month` (month-truncated), not raw started_at — safe because

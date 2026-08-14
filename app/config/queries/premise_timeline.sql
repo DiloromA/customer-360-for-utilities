@@ -1,9 +1,9 @@
 -- Service-event log for this premise (address): move-in / move-out / rate
 -- switch / meter swap. Premise-native version of customer_timeline.sql —
 -- no account_number resolution step, since fact_service_event is already
--- premise-keyed. Events not belonging to the current occupant's account
+-- premise-keyed. Events not belonging to the current customer's account
 -- are flagged is_current_account = false so the UI can label them
--- "(previous occupant)". Keyed by premise_number (STRING) — see
+-- "(previous customer)". Keyed by premise_number (STRING) — see
 -- premise_header.sql's note on why the client never carries the raw
 -- BIGINT premise_id.
 

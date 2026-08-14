@@ -11,7 +11,7 @@
 -- raw_customer_complaint_event.sql uses for complaints, so Voice-of-Customer
 -- themes read consistently with the complaint-theme vocabulary elsewhere in
 -- the app. Theme-frequency counts are derived client-side from this same
--- row-level feed (the panel is deliberately thin per the design doc — no
+-- row-level feed (the panel is deliberately thin — no
 -- separate aggregate query needed).
 --
 -- account_number resolves customer_id -> one canonical account per customer

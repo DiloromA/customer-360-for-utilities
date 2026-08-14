@@ -30,7 +30,7 @@ SELECT
   i.impact_id,
   i.active_outage_id,
   abs(xxhash64(i.customer_id))                                       AS customer_id,
-  abs(xxhash64(i.usage_point_id))                                    AS service_point_id,
+  abs(xxhash64(i.service_point_id))                                    AS service_point_id,
   abs(xxhash64(i.premise_id))                                        AS premise_id,
   i.circuit_id,
   i.snapshot_at,

@@ -1,5 +1,5 @@
 -- Survey invitations aggregate — the response-rate denominator for the CSAT
--- view's Survey Health panel (csat-experience-view-design.md §4.2).
+-- view's Survey Health panel.
 --
 -- Grain: (survey_id, period_date_key, segment). period_date_key is the
 -- survey's launch date (the invitation event), not the response date —

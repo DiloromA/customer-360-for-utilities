@@ -3,7 +3,8 @@ import { geniePlugin } from "./geniePlugin";
 import { focusPlugin } from "./focusPlugin";
 import { dataModelPlugin } from "./dataModelPlugin";
 import { metricsPlugin } from "./metricsPlugin";
+import { configPlugin } from "./configPlugin";
 
 await createApp({
-  plugins: [server(), analytics(), geniePlugin(), focusPlugin(), dataModelPlugin(), metricsPlugin()],
+  plugins: [server(), analytics(), geniePlugin(), focusPlugin(), dataModelPlugin(), metricsPlugin(), configPlugin()],
 });

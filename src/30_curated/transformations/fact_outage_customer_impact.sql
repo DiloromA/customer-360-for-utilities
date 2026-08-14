@@ -28,7 +28,7 @@ SELECT
   o.impact_id,
   o.outage_id,
   abs(xxhash64(o.customer_id))                                           AS customer_id,
-  abs(xxhash64(o.usage_point_id))                                        AS service_point_id,
+  abs(xxhash64(o.service_point_id))                                        AS service_point_id,
   abs(xxhash64(up.premise_id))                                           AS premise_id,
   o.circuit_id,
   o.affected_start,
@@ -38,5 +38,5 @@ SELECT
   o.priority_restoration_flag,
   current_timestamp() AS _ingested_at
 FROM ${outages_schema}.raw_outage_customer_impact o
-LEFT JOIN ${customer_master_schema}.raw_usage_point up
-  ON up.usage_point_id = o.usage_point_id;
+LEFT JOIN ${customer_master_schema}.raw_service_point up
+  ON up.service_point_id = o.service_point_id;

@@ -91,16 +91,19 @@ encoded.columns = [_safe_feature_name(c) for c in encoded.columns]
 FEATURE_COLUMNS = [c for c in encoded.columns if c != "has_pv_label"]
 print(f"Feature columns after encoding: {len(FEATURE_COLUMNS)}")
 
-# Persist the exact training snapshot for SQL exploration.
-training_snapshot = features_df.copy()
+# Persist the exact training snapshot for SQL exploration. Written
+# Spark-natively straight from the source feature table: a
+# createDataFrame(pandas) round-trip serializes the whole frame into one
+# broadcast RPC and blows spark.rpc.message.maxSize (256MB) at full scale.
+snapshot_table = f"{catalog}.{schema}.ml_pv_training_data"
 (
-    spark.createDataFrame(training_snapshot)
+    spark.table(f"{catalog}.{schema}.ml_pv_detection_features")
     .write.mode("overwrite")
     # overwriteSchema: keeps re-runs safe across feature-column changes.
     .option("overwriteSchema", "true")
-    .saveAsTable(f"{catalog}.{schema}.ml_pv_training_data")
+    .saveAsTable(snapshot_table)
 )
-print(f"Wrote ml_pv_training_data ({len(training_snapshot)} rows)")
+print(f"Wrote {snapshot_table} ({spark.table(snapshot_table).count()} rows)")
 
 # COMMAND ----------
 

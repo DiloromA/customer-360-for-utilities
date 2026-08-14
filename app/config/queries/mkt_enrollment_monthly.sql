@@ -2,7 +2,7 @@
 -- 24 months. Drives both the per-program enrollment trend chart and
 -- the program-rail sparklines (one query returns data for all).
 --
--- Reads metric_dsm_uptake (see docs/metric-views-foundation-design.md §8).
+-- Reads metric_dsm_uptake.
 
 SELECT
   `Program ID`                                        AS program_id,

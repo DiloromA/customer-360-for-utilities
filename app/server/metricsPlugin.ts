@@ -1,4 +1,4 @@
-// Metrics Catalog (design doc §8/§12.1 item 2): surfaces the governed UC
+// Metrics Catalog: surfaces the governed UC
 // metric views (metric_*) — name, description, dimensions, measures.
 // A metric view's dimensions/measures aren't exposed as structured metadata
 // anywhere in information_schema (it only lists them as plain columns, with

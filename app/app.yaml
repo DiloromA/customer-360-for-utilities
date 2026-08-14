@@ -18,11 +18,22 @@ env:
   # Per-environment values. These MUST be correct here: the DAB app resource's
   # `config:` env override (resources/app.yml) is deprecated and current CLI
   # versions (>= v1.x) no longer apply it at deploy — the app runs with exactly
-  # what this file says. Point these at your catalog/schema/Genie space when
-  # deploying elsewhere.
+  # what this file says. The values below are the default (current-workspace)
+  # deploy; scripts/stage-deploy.sh overrides any of them from the matching env
+  # var (DATABRICKS_CATALOG / DATABRICKS_SCHEMA / DATABRICKS_GENIE_SPACE_ID /
+  # DATABRICKS_AUTH_MODE) when set, so a different environment needs no edit here
+  # — just export the var before `npm run build`, or drop your values in the
+  # gitignored `app/scripts/dev-env.sh`, which the build auto-loads.
   - name: DATABRICKS_CATALOG
-    value: timstanton_stable
+    value: main
   - name: DATABRICKS_SCHEMA
     value: customer_360
   - name: DATABRICKS_GENIE_SPACE_ID
-    value: 01f15b1323df18a0a4af1340c92ccef0
+    value: REPLACE_WITH_YOUR_GENIE_SPACE_ID
+  # sp | obo. Drives the app's read identity: in obo mode
+  # dbx.ts (custom plugins) and the useC360Query wrapper (analytics reads) both
+  # run AS THE VIEWER via the forwarded user token; in sp mode everything runs as
+  # the app service principal (today's default). stage-deploy.sh sets this per
+  # target; the server exposes it to the browser via GET /api/config/client.
+  - name: DATABRICKS_AUTH_MODE
+    value: sp

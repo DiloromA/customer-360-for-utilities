@@ -45,6 +45,12 @@ dbutils.widgets.text("workspace_folder", "")
 # App name — used to look up the app's service principal and grant it CAN_RUN on
 # the space (the app runs as a dedicated SP that does not inherit deployer grants).
 dbutils.widgets.text("app_name", "")
+# Auth mode (sp | obo) + the viewer principal to grant in obo mode. In sp mode
+# the app SP gets CAN_RUN (app_name lookup below); in obo mode $viewer_grantee
+# gets CAN_RUN, since "Ask the Map" runs as the viewer. Threaded from ${var.*}
+# in resources/app.yml.
+dbutils.widgets.text("auth_mode", "sp")
+dbutils.widgets.text("viewer_grantee", "")
 
 import hashlib
 import json
@@ -532,43 +538,67 @@ print("Verified: text_instructions, example_question_sqls, sql_snippets.filters,
 
 # COMMAND ----------
 
-# Grant the app's service principal CAN_RUN on the space. Databricks Apps run as
-# a dedicated SP that does NOT inherit the deploying user's grants, so without
+# Grant CAN_RUN on the space to whoever runs "Ask the Map". Databricks Apps run
+# as a dedicated SP that does NOT inherit the deploying user's grants, so without
 # this the app's /api/genie/ask route hits 403 PERMISSION_DENIED on the space
-# (same reason scripts/grant-permissions.sh grants the SP on the UC schema). We
-# PATCH (merge) so the owner/admin ACEs are preserved. Idempotent — safe to
-# re-run, and it re-grants after the app is renamed/redeployed under a new SP.
-app_name = dbutils.widgets.get("app_name").strip()
-if app_name:
-    _check_id(app_name, "app_name")
-    try:
-        app_resp = requests.get(f"{host}/api/2.0/apps/{app_name}", headers=headers, timeout=30)
-        app_resp.raise_for_status()
-        sp_client_id = app_resp.json().get("service_principal_client_id")
-        if sp_client_id:
-            perm_resp = requests.patch(
-                f"{host}/api/2.0/permissions/genie/{space_id}",
-                headers=headers,
-                json={
-                    "access_control_list": [
-                        {"service_principal_name": sp_client_id, "permission_level": "CAN_RUN"}
-                    ]
-                },
-                timeout=30,
-            )
-            if perm_resp.ok:
-                print(f"Granted CAN_RUN on space to app SP {sp_client_id}")
-            else:
-                print(f"Warning: could not grant app SP CAN_RUN "
-                      f"({perm_resp.status_code}): {perm_resp.text[:300]}")
-        else:
-            print(f"Warning: app {app_name!r} has no service_principal_client_id yet; "
-                  "skipping space grant (run this job again after the app is created).")
-    except Exception as e:
-        print(f"Warning: could not grant app SP on space: {e}")
+# (same reason scripts/grant-permissions.sh grants on the UC schema). We PATCH
+# (merge) so the owner/admin ACEs are preserved. Idempotent — safe to re-run.
+#
+# Mode selects the grantee (keep both paths):
+#   sp  → the app's service principal (looked up from app_name).
+#   obo → $viewer_grantee, the signed-in viewer principal. The permissions API
+#         needs the ACE keyed by principal TYPE, so map '@' → user_name else
+#         group_name (an SQL GRANT is type-agnostic, but this REST ACL is not —
+#         a group passed as user_name, or vice versa, yields a wrong/failed ACE).
+auth_mode = dbutils.widgets.get("auth_mode").strip().lower()
+viewer_grantee = dbutils.widgets.get("viewer_grantee").strip()
+
+
+def _grant_can_run(ace: dict) -> None:
+    perm_resp = requests.patch(
+        f"{host}/api/2.0/permissions/genie/{space_id}",
+        headers=headers,
+        json={"access_control_list": [{**ace, "permission_level": "CAN_RUN"}]},
+        timeout=30,
+    )
+    if perm_resp.ok:
+        print(f"Granted CAN_RUN on space to {ace}")
+    else:
+        print(f"Warning: could not grant CAN_RUN {ace} "
+              f"({perm_resp.status_code}): {perm_resp.text[:300]}")
+
+
+if auth_mode == "obo":
+    if viewer_grantee:
+        # '@' heuristic: an email is a user, anything else (e.g. 'account users')
+        # is a group.
+        ace = ({"user_name": viewer_grantee} if "@" in viewer_grantee
+               else {"group_name": viewer_grantee})
+        try:
+            _grant_can_run(ace)
+        except Exception as e:
+            print(f"Warning: could not grant viewer CAN_RUN on space: {e}")
+    else:
+        print("auth_mode=obo but no viewer_grantee provided; skipping space grant "
+              "(viewers will 403 on 'Ask the Map' until granted CAN_RUN).")
 else:
-    print("No app_name provided; skipping app-SP space grant "
-          "(the app will 403 on 'Ask the Map' until the SP is granted CAN_RUN).")
+    app_name = dbutils.widgets.get("app_name").strip()
+    if app_name:
+        _check_id(app_name, "app_name")
+        try:
+            app_resp = requests.get(f"{host}/api/2.0/apps/{app_name}", headers=headers, timeout=30)
+            app_resp.raise_for_status()
+            sp_client_id = app_resp.json().get("service_principal_client_id")
+            if sp_client_id:
+                _grant_can_run({"service_principal_name": sp_client_id})
+            else:
+                print(f"Warning: app {app_name!r} has no service_principal_client_id yet; "
+                      "skipping space grant (run this job again after the app is created).")
+        except Exception as e:
+            print(f"Warning: could not grant app SP on space: {e}")
+    else:
+        print("No app_name provided; skipping app-SP space grant "
+              "(the app will 403 on 'Ask the Map' until the SP is granted CAN_RUN).")
 
 print()
 print("➜ Set DATABRICKS_GENIE_SPACE_ID in the app config to this space_id.")

@@ -5,10 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "NODE_ENV=development tsx watch server/server.ts",
+    "typecheck": "tsc --noEmit",
     "build:server": "tsdown",
     "build:client": "vite build --config client/vite.config.ts",
     "stage": "bash scripts/stage-deploy.sh",
-    "build": "npm run build:server && npm run build:client && npm run stage",
+    "build": "npm run typecheck && npm run build:server && npm run build:client && npm run stage",
     "start": "node build/server.mjs"
   },
   "dependencies": {

@@ -3,9 +3,9 @@
 -- bounds. Returns all metrics so the client can swap layers without a
 -- new round-trip.
 --
--- Customers are the CURRENT occupant per premise: each premise is joined to its
+-- Customers are the CURRENT customer per premise: each premise is joined to its
 -- current billing link (bridge_account_premise where is_current) and then to the
--- occupant's profile (dim_customer). Prior occupants are excluded automatically.
+-- customer's profile (dim_customer). Prior customers are excluded automatically.
 --
 -- The "Complaint volume" layer can be focused on a single complaint
 -- sub-category via :complaint_theme — when set, the whole map filters to
@@ -23,6 +23,7 @@
 -- @param issue_flags      STRING  -- payment_stress, churn_high, critical_care, frequent_outages, high_complaints, liheap
 -- @param complaint_theme  STRING  -- "" = all complaints; else a fact_customer_complaints.sub_category to isolate
 -- @param session_id       STRING  -- "" = no cohort filter; else scope to this session's app_focus_set cohort
+-- @param grain            STRING  -- 'premise' | 'customer' | 'owner'; default 'customer' (customer grain = today's output)
 
 WITH premises_in_view AS (
   SELECT
@@ -53,7 +54,7 @@ filter_lists AS (
 customers_in_view AS (
   -- Same multi-dim filter the customer rail uses (see
   -- filters.tsx). All-empty params = no filtering, so the map behaves as
-  -- before when the rail is untouched. One row per premise = current occupant.
+  -- before when the rail is untouched. One row per premise = current customer.
   SELECT
     p.h3_index_long,
     p.premise_id,
@@ -173,6 +174,53 @@ cell_enrollment AS (
   JOIN customers_in_view civ ON civ.customer_id = fpe.customer_id
   WHERE fpe.enrollment_status IN ('active', 'completed')
   GROUP BY civ.h3_index_long
+),
+
+cell_premise_complaints AS (
+  -- Premise-pinned complaint count for premise grain (matches premise_complaints.sql join path).
+  -- Only complaints with a resolved premise_id are counted here; unmapped ones go to
+  -- cell_unmapped_complaints below for the legend footnote.
+  SELECT
+    civ.h3_index_long,
+    COUNT(fc.complaint_id) AS n_complaints_pinned
+  FROM customers_in_view civ
+  CROSS JOIN {{catalog}}.{{schema}}.curated_demo_config cfg
+  JOIN {{catalog}}.{{schema}}.fact_customer_complaints fc
+    ON  fc.premise_id    = civ.premise_id
+    AND fc.complaint_date BETWEEN DATE_SUB(cfg.as_of_date, cfg.complaint_window_days) AND cfg.as_of_date
+    AND (:complaint_theme = '' OR fc.sub_category = :complaint_theme)
+  GROUP BY civ.h3_index_long
+),
+
+cell_unmapped_complaints AS (
+  -- Complaints for cell customers with no premise attribution; used by the client
+  -- to show a "~N% couldn't be pinned to a premise" legend footnote at premise grain.
+  SELECT
+    civ.h3_index_long,
+    COUNT(DISTINCT fc.complaint_id) AS n_complaints_unmapped
+  FROM customers_in_view civ
+  CROSS JOIN {{catalog}}.{{schema}}.curated_demo_config cfg
+  JOIN {{catalog}}.{{schema}}.fact_customer_complaints fc
+    ON  fc.customer_id   = civ.customer_id
+    AND fc.premise_id    IS NULL
+    AND fc.complaint_date BETWEEN DATE_SUB(cfg.as_of_date, cfg.complaint_window_days) AND cfg.as_of_date
+    AND (:complaint_theme = '' OR fc.sub_category = :complaint_theme)
+  GROUP BY civ.h3_index_long
+),
+
+cell_premise_outages AS (
+  -- Outage minutes aggregated by premise (fact_outage_customer_impact has premise_id 100%).
+  -- 90-day window mirrors the customer-rollup window used at customer grain.
+  SELECT
+    civ.h3_index_long,
+    SUM(oi.minutes_out) AS sum_outage_minutes_premise
+  FROM customers_in_view civ
+  CROSS JOIN {{catalog}}.{{schema}}.curated_demo_config cfg
+  JOIN {{catalog}}.{{schema}}.fact_outage_customer_impact oi
+    ON  oi.premise_id    = civ.premise_id
+    AND oi.affected_start >= DATE_SUB(cfg.as_of_date, 90)
+    AND oi.affected_start <= cfg.as_of_date
+  GROUP BY civ.h3_index_long
 )
 
 SELECT
@@ -193,10 +241,26 @@ SELECT
   m.n_high_usage,
   ROUND(100.0 * m.n_high_usage / m.n_customers, 1)                        AS pct_high_usage,
   ROUND(1.0 * m.sum_digital_adoption / m.n_customers, 0)                  AS avg_digital_adoption,
-  m.sum_outage_minutes_90d,
-  ROUND(1.0 * m.sum_outage_minutes_90d / m.n_customers, 1)                AS avg_outage_min_per_customer_90d,
-  m.sum_complaints_90d,
-  ROUND(1000.0 * m.sum_complaints_90d / m.n_customers, 1)                 AS complaints_per_1k_90d,
+  CASE WHEN :grain = 'premise'
+    THEN COALESCE(po.sum_outage_minutes_premise, 0)
+    ELSE m.sum_outage_minutes_90d
+  END                                                                        AS sum_outage_minutes_90d,
+  CASE WHEN :grain = 'premise'
+    THEN ROUND(1.0 * COALESCE(po.sum_outage_minutes_premise, 0) / m.n_customers, 1)
+    ELSE ROUND(1.0 * m.sum_outage_minutes_90d / m.n_customers, 1)
+  END                                                                        AS avg_outage_min_per_customer_90d,
+  CASE WHEN :grain = 'premise'
+    THEN COALESCE(pc.n_complaints_pinned, 0)
+    ELSE m.sum_complaints_90d
+  END                                                                        AS sum_complaints_90d,
+  CASE WHEN :grain = 'premise'
+    THEN ROUND(1000.0 * COALESCE(pc.n_complaints_pinned, 0) / m.n_customers, 1)
+    ELSE ROUND(1000.0 * m.sum_complaints_90d / m.n_customers, 1)
+  END                                                                        AS complaints_per_1k_90d,
+  CASE WHEN :grain = 'premise'
+    THEN COALESCE(uc.n_complaints_unmapped, 0)
+    ELSE 0
+  END                                                                        AS n_complaints_unmapped,
   ROUND(100.0 * m.avg_p_complaint_30d, 1)                                 AS avg_complaint_risk_pct,
   m.n_risk_high,
   ROUND(100.0 * m.n_risk_high / m.n_customers, 1)                         AS pct_risk_high,
@@ -206,5 +270,8 @@ SELECT
   COALESCE(e.n_enrolled_any_program, 0)                                   AS n_enrolled_any_program,
   ROUND(100.0 * COALESCE(e.n_enrolled_any_program, 0) / m.n_customers, 1) AS pct_enrolled_any_program
 FROM cell_customer_metrics m
-LEFT JOIN cell_themes        t  USING (h3_index_long)
-LEFT JOIN cell_enrollment    e  USING (h3_index_long)
+LEFT JOIN cell_themes                t   USING (h3_index_long)
+LEFT JOIN cell_enrollment            e   USING (h3_index_long)
+LEFT JOIN cell_premise_complaints    pc  USING (h3_index_long)
+LEFT JOIN cell_unmapped_complaints   uc  USING (h3_index_long)
+LEFT JOIN cell_premise_outages       po  USING (h3_index_long)

@@ -1,14 +1,14 @@
--- Meter Readings — hourly synthetic AMI for every (usage_point, hour) over
+-- Meter Readings — hourly synthetic AMI for every (service point, hour) over
 -- the display window (as_of_date minus history_months, trailing).
 --
--- Base load PLUS five DER adders (EV / PV / BESS / Heat Pump / Smart
--- Thermostat DR). Pure SDP, single MV, multi-CTE pipeline:
+-- Base load PLUS four DER adders (EV / PV / Heat Pump / Smart Thermostat DR).
+-- Pure SDP, single MV, multi-CTE pipeline:
 --
 --   1. hourly_total_per_unit       ResStock per-unit hourly kWh by bldg type
---   2. customer_full               premise + usage_point + current-occupant
+--   2. customer_full               premise + service point + current-customer
 --                                  customer (via premise_customer_map) + bldg
 --                                  type + base-load multiplier (archetype x
---                                  envelope). Keyed by usage_point only; no
+--                                  envelope). Keyed by service point only; no
 --                                  denormalized customer_id.
 --   3. weather_calendar_map        display_date -> analog source_date
 --                                  in the fixed 2018 library + kwh_scale.
@@ -27,11 +27,9 @@
 --   9. with_der (HP)               Heat pump heating from weather temp:
 --                                  HDH * sqft * 0.0003 / COP(temp), backup
 --                                  strip below -10C if hp_has_backup_strip.
---   10. with_der (BESS)            Scheduled BESS dispatch (TOU arb / peak shave
---                                  / backup only).
---   11. with_der (tstat)           -5% dampening of base during summer peak
+--   10. with_der (tstat)           -5% dampening of base during summer peak
 --                                  (16-20 hr, May-Sep) for DR-enrolled tstats.
---   12. (final SELECT)             Sum all components -> kwh_delivered + kwh_received
+--   11. (final SELECT)             Sum all components -> kwh_delivered + kwh_received
 --
 -- Weather/PV physics joins run on the AMY source-clock hour (amy_timestamp_hour),
 -- not the display timestamp — see the `weather` and `pv_shape` CTEs below. Only
@@ -40,16 +38,30 @@
 -- source hour (same EnergyPlus simulation vintage). weather_calendar_map maps
 -- each display_date to its own day-of-week analog with its own kwh_scale, so
 -- display years are not hour-for-hour identical weather/PV copies and YoY is
--- non-degenerate (temporal-realism-scoping §3).
+-- non-degenerate.
+--
+-- ── Performance note — the optimizer hints below are load-bearing ────────────
+-- This MV is a deliberate large fan-out: ~50K service points × ~17,520 hours
+-- explodes into a multi-billion-row intermediate. Three hints keep that
+-- tractable and must not be removed:
+--   • REPARTITION(512) on `customer_full` — that CTE is ~1 row per service
+--     point, so Spark collapses it to a handful of partitions. It is the
+--     fan-out source, so left alone the explosion serializes onto a few tasks.
+--     The explicit 512 also stops AQE coalescing it back down.
+--   • BROADCAST on the `base` and `with_der` joins — the broadcast sides are
+--     tiny (building-types × 8,760 hrs; ~730 calendar rows; counties × 8,760;
+--     8,760 PV-shape rows). A shuffle join lands the fan-out on one skewed
+--     task (~90 GB spill observed); broadcasting keeps it partition-parallel.
+-- Each hint carries its own rationale at the call site.
 
 CREATE OR REFRESH MATERIALIZED VIEW raw_meter_readings (
-  CONSTRAINT non_null_usage_point_id EXPECT (usage_point_id IS NOT NULL),
+  CONSTRAINT non_null_service_point_id EXPECT (service_point_id IS NOT NULL),
   CONSTRAINT non_null_timestamp      EXPECT (timestamp_utc IS NOT NULL),
   CONSTRAINT non_negative_delivered  EXPECT (kwh_delivered >= 0),
   CONSTRAINT non_negative_received   EXPECT (kwh_received >= 0),
   CONSTRAINT non_negative_base       EXPECT (kwh_base >= 0)
 )
-COMMENT 'Hourly synthetic AMI meter readings — one row per (usage_point, hour) for 2017+2018. Includes base load (ResStock-derived) plus EV / PV / BESS / Heat Pump / Smart Thermostat DR adders. kwh_delivered is net of all DER (what billing sees); kwh_received is PV export; component channels (kwh_base, kwh_ev, kwh_pv, kwh_hp, kwh_bess, kwh_tstat_savings) provide ground-truth attribution for ML training and curated views. PK: (usage_point_id, timestamp_utc). FK: usage_point_id -> raw_usage_point.'
+COMMENT 'Hourly synthetic AMI meter readings — one row per (service point, hour) for 2017+2018. Includes base load (ResStock-derived) plus EV / PV / Heat Pump / Smart Thermostat DR adders. kwh_delivered is net of all DER (what billing sees); kwh_received is PV export; component channels (kwh_base, kwh_ev, kwh_pv, kwh_hp, kwh_tstat_savings) provide ground-truth attribution for ML training and curated views. PK: (service_point_id, timestamp_utc). FK: service_point_id -> raw_service_point.'
 AS
 
 WITH
@@ -81,26 +93,26 @@ hourly_total_per_unit AS (
 
 -- ────────────────────────────────────────────────────────────────────────
 -- 2. Customer with all attrs needed for the adders. Joins DER table so
---    EV/PV/BESS/HP/tstat fields are inlined (NULL when not adopted).
+--    EV/PV/HP/tstat fields are inlined (NULL when not adopted).
 --
 --    REPARTITION(512): this CTE is the fan-out source for the ~17,520-hour
 --    explosion in `base`. Left alone it collapses to a handful of partitions
---    (it's only ~1 row per usage_point), serializing the explosion onto a
+--    (it's only ~1 row per service point), serializing the explosion onto a
 --    few tasks. The explicit partition count also stops AQE from coalescing
 --    it back down.
 -- ────────────────────────────────────────────────────────────────────────
 customer_full AS (
   SELECT /*+ REPARTITION(512) */
-    up.usage_point_id,
+    up.service_point_id,
     c.customer_class,
     c.archetype,
-    -- Load-scaling sqft: divided across sibling usage_points so a sub-metered
-    -- large commercial premise's (temporal-realism §5.3) total load stays the
+    -- Load-scaling sqft: divided across sibling service points so a sub-metered
+    -- large commercial premise's total load stays the
     -- building's true load instead of multiplying by meter count. A no-op for
-    -- the ~everyone-else case (n_usage_points = 1). Building-type
+    -- the ~everyone-else case (n_service_points = 1). Building-type
     -- classification below intentionally keeps using the RAW p.sqft (the
     -- whole building's archetype doesn't change because it has more meters).
-    p.sqft / up.n_usage_points                                      AS sqft,
+    p.sqft / up.n_service_points                                      AS sqft,
     p.envelope_quality,
     p.primary_occupancy,
     p.county_fips,
@@ -160,10 +172,6 @@ customer_full AS (
     COALESCE(d.has_pv, false)                                        AS has_pv,
     d.pv_system_kw_dc,
 
-    COALESCE(d.has_bess, false)                                      AS has_bess,
-    d.bess_power_kw,
-    d.bess_dispatch_mode,
-
     COALESCE(d.has_heat_pump, false)                                 AS has_heat_pump,
     d.hp_cop_at_47f,
     d.hp_cop_at_5f,
@@ -172,11 +180,11 @@ customer_full AS (
     COALESCE(d.has_smart_thermostat, false)                          AS has_smart_thermostat,
     COALESCE(d.tstat_dr_enrolled, false)                             AS tstat_dr_enrolled
   FROM ${customer_master_schema}.raw_premises p
-  JOIN ${customer_master_schema}.raw_service_location sl ON sl.premise_id = p.premise_id
-  JOIN ${customer_master_schema}.raw_usage_point up ON up.service_location_id = sl.service_location_id
+  JOIN ${customer_master_schema}.raw_premise_service_attrs sl ON sl.premise_id = p.premise_id
+  JOIN ${customer_master_schema}.raw_service_point up ON up.service_location_id = sl.service_location_id
   JOIN ${customer_master_schema}.raw_premise_customer_map m ON m.premise_id = p.premise_id
   JOIN ${customer_master_schema}.raw_customer c ON c.customer_id = m.current_customer_id
-  LEFT JOIN ${der_adoption_table} d ON d.usage_point_id = up.usage_point_id
+  LEFT JOIN ${der_adoption_table} d ON d.service_point_id = up.service_point_id
 ),
 
 -- ────────────────────────────────────────────────────────────────────────
@@ -203,13 +211,12 @@ weather_calendar_map AS (
 -- shuffle or sort of the exploded rows.
 base AS (
   SELECT /*+ BROADCAST(htp), BROADCAST(wcm) */
-    cf.usage_point_id,
+    cf.service_point_id,
     cf.customer_class,
     cf.sqft,
     cf.county_fips,
     cf.has_ev, cf.ev_battery_kwh, cf.ev_vehicle_class, cf.ev_charging_pattern, cf.ev_is_tou_enrolled,
     cf.has_pv, cf.pv_system_kw_dc,
-    cf.has_bess, cf.bess_power_kw, cf.bess_dispatch_mode,
     cf.has_heat_pump, cf.hp_cop_at_47f, cf.hp_cop_at_5f, cf.hp_has_backup_strip,
     cf.has_smart_thermostat, cf.tstat_dr_enrolled,
     -- Carried through so weather/PV can join on the source clock (see the
@@ -371,28 +378,6 @@ with_der AS (
     ELSE 0.0
     END                                                              AS kwh_hp,
 
-    -- BESS dispatch (signed: + draws from grid to charge, - delivers to home)
-    CASE WHEN b.has_bess THEN
-      CASE b.bess_dispatch_mode
-        WHEN 'tou_arbitrage' THEN
-          CASE
-            WHEN HOUR(b.timestamp_utc) BETWEEN 23 AND 23 THEN  b.bess_power_kw * 0.7
-            WHEN HOUR(b.timestamp_utc) BETWEEN 0  AND 4  THEN  b.bess_power_kw * 0.7
-            WHEN HOUR(b.timestamp_utc) BETWEEN 17 AND 20 THEN -b.bess_power_kw * 0.7
-            ELSE 0.0
-          END
-        WHEN 'peak_shave' THEN
-          CASE
-            WHEN HOUR(b.timestamp_utc) BETWEEN 10 AND 14 THEN  b.bess_power_kw * 0.5
-            WHEN HOUR(b.timestamp_utc) BETWEEN 17 AND 20 THEN -b.bess_power_kw * 0.6
-            ELSE 0.0
-          END
-        WHEN 'backup_only' THEN 0.0
-        ELSE 0.0
-      END
-    ELSE 0.0
-    END                                                              AS kwh_bess,
-
     -- Smart-thermostat DR dampening (summer peak hours only)
     CASE
       WHEN b.has_smart_thermostat AND b.tstat_dr_enrolled
@@ -411,22 +396,22 @@ with_der AS (
 )
 
 SELECT
-  usage_point_id,
+  service_point_id,
   timestamp_utc,
 
-  -- Final delivered (net): base + EV + HP + BESS + tstat_savings - PV.
+  -- Final delivered (net): base + EV + HP + tstat_savings - PV.
   -- If net < 0 (PV exporting more than the home consumes), delivered = 0
   -- and the export goes into kwh_received.
   ROUND(
     GREATEST(
-      kwh_base + kwh_ev + kwh_hp + kwh_bess + kwh_tstat_savings - kwh_pv,
+      kwh_base + kwh_ev + kwh_hp + kwh_tstat_savings - kwh_pv,
       0.0
     ), 4
   )                                                                  AS kwh_delivered,
 
   ROUND(
     GREATEST(
-      kwh_pv - (kwh_base + kwh_ev + kwh_hp + kwh_bess + kwh_tstat_savings),
+      kwh_pv - (kwh_base + kwh_ev + kwh_hp + kwh_tstat_savings),
       0.0
     ), 4
   )                                                                  AS kwh_received,
@@ -435,7 +420,6 @@ SELECT
   ROUND(kwh_ev,             4)                                       AS kwh_ev,
   ROUND(kwh_pv,             4)                                       AS kwh_pv,
   ROUND(kwh_hp,             4)                                       AS kwh_hp,
-  ROUND(kwh_bess,           4)                                       AS kwh_bess,
   ROUND(kwh_tstat_savings,  4)                                       AS kwh_tstat_savings,
 
   YEAR(timestamp_utc)                                                AS year,

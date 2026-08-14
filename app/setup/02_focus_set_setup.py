@@ -8,7 +8,7 @@
 # MAGIC per-load client session key, NOT the Genie conversationId) so every browser
 # MAGIC session has its own isolated cohort in a single shared table.
 # MAGIC
-# MAGIC Convention divergences (intentional — see `docs/conventions.md` / demo docs):
+# MAGIC Intentional convention divergences:
 # MAGIC - Hard rule #12 ("runtime state not in UC"): this is session/runtime-ish
 # MAGIC   state, but Genie can only reach a UC table (it runs on the SQL warehouse
 # MAGIC   over UC, not Lakebase). Mitigated by short TTL (`03_focus_set_ttl.py`).
@@ -73,6 +73,31 @@ if "premise_id" not in existing_cols:
     print("Added premise_id column.")
 else:
     print("premise_id column already present.")
+
+# Grain-aware focus contract: grain and subject_key identify which
+# viewing grain and natural-key entity defined this cohort. Both nullable so
+# legacy rows (written before this migration) remain valid.
+if "grain" not in existing_cols:
+    spark.sql(
+        f"""
+        ALTER TABLE {fq} ADD COLUMN
+        grain STRING COMMENT 'Grain that defined this cohort row: customer | account | premise. NULL for legacy rows written before the grain contract.'
+        """
+    )
+    print("Added grain column.")
+else:
+    print("grain column already present.")
+
+if "subject_key" not in existing_cols:
+    spark.sql(
+        f"""
+        ALTER TABLE {fq} ADD COLUMN
+        subject_key STRING COMMENT 'Opaque subject key "<grain>:<naturalKey>" identifying the entity that defined this cohort. NULL for legacy rows.'
+        """
+    )
+    print("Added subject_key column.")
+else:
+    print("subject_key column already present.")
 
 # COMMAND ----------
 

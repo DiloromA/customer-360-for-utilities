@@ -4,10 +4,10 @@
 -- the program's customer_segment — the same convention customer_recommendations uses.
 --
 -- Reads metric_customer_base (eligible half) + metric_dsm_uptake
--- (enrolled half) — see docs/metric-views-foundation-design.md §8.
+-- (enrolled half).
 -- The eligible denominator counts the CURRENT customer base
 -- (metric_customer_base is already filtered to
--- bridge_account_premise.is_current), so prior-occupant / chain-parent
+-- bridge_account_premise.is_current), so prior-customer / chain-parent
 -- profile rows don't inflate it. dim_program stays a plain app-side
 -- lookup (small ref table, not an aggregate fact).
 

@@ -1,14 +1,14 @@
 -- Top customers inside a single H3 cell, ordered by "interesting-ness"
 -- so the drill-down panel shows the cases most worth a customer conversation.
 -- Returns the human account_number as the selectable identity (one row per
--- premise = current occupant, via bridge_account_premise where is_current).
+-- premise = current customer, via bridge_account_premise where is_current).
 
 -- @param h3_index   STRING
 -- @param resolution INTEGER
 
 WITH
 -- One row per premise for address display. A large sub-metered commercial
--- premise (temporal-realism §5.3) has 2-5 dim_service_point rows sharing the
+-- premise has 2-5 dim_service_point rows sharing the
 -- same address, so a naive join would duplicate that account's row in the
 -- drill-down list — any one sibling is a fine representative since the
 -- address fields are identical across siblings.

@@ -1,4 +1,4 @@
--- weather_calendar_map (temporal-realism-scoping §3). Separates
+-- weather_calendar_map. Separates
 -- the fixed SOURCE LIBRARY (one canonical year of AMY2018 shapes/weather/PV)
 -- from the parameterized DISPLAY CALENDAR (as_of_date minus a
 -- trailing history_months window). For every display_date this picks an

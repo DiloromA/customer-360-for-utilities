@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { ExternalLink, RotateCcw, Ruler, Tag } from "lucide-react";
 
-// Metrics Catalog (design doc §8/§12.1 item 2): the governed
+// Metrics Catalog: the governed
 // metric_* UC metric views, served by GET /api/metrics/catalog (live
 // information_schema introspection — always reflects the current count).
 // Pairs with the Data Model view — that shows *where* metric views sit in

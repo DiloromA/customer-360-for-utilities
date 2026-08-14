@@ -7,7 +7,7 @@
 -- The LAG/trailing-avg windows below are computed over a (account,
 -- calendar-month) DEDUPLICATED grain, not raw bill rows: a relocation's or
 -- in-window turnover's transition month can contribute 2 rows for one
--- account+period (temporal-realism §5.1/§5.2), and a ROW-count-based LAG(,12)
+-- account+period, and a ROW-count-based LAG(,12)
 -- would silently desync by one calendar month for the rest of that account's
 -- history the moment any month contributes more than one row.
 
@@ -30,7 +30,7 @@ WITH base AS (
 ),
 
 -- Collapse to one row per (account, calendar month) before windowing, so a
--- transition month's extra row (2 usage_points billed under one account)
+-- transition month's extra row (2 service points billed under one account)
 -- doesn't shift the ROW-based LAG/trailing-avg off by a month.
 monthly AS (
   SELECT
@@ -78,7 +78,7 @@ SELECT
   abs(xxhash64(account_id))           AS account_id,
   abs(xxhash64(customer_id))          AS customer_id,
   abs(xxhash64(service_agreement_id)) AS service_agreement_id,
-  abs(xxhash64(usage_point_id))       AS service_point_id,
+  abs(xxhash64(service_point_id))       AS service_point_id,
   rate_schedule,
   bill_period_start,
   bill_period_end,

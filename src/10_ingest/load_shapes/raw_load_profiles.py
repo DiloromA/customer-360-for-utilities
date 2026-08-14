@@ -9,11 +9,11 @@
 
 # COMMAND ----------
 
-import dlt
+from pyspark import pipelines as dp
 from pyspark.sql import functions as F
 
 
-@dlt.table(
+@dp.materialized_view(
     name="raw_load_profiles",
     comment=(
         "Wide-format NREL End-Use Load Profiles for US Building Stock. "
@@ -28,7 +28,7 @@ from pyspark.sql import functions as F
     ),
 )
 def load_profiles():
-    df = spark.read.table("LIVE._all_raw")
+    df = spark.read.table("_all_raw")
 
     # Extract metadata from file paths
     df = (

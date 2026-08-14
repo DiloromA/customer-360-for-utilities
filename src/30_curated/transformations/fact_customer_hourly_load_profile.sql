@@ -5,10 +5,10 @@
 -- raw_meter_readings is ~900M rows.
 --
 -- Physical grain only — same discipline raw_meter_readings itself already
--- follows (usage_point-keyed, no denormalized customer_id). account_id/
--- customer_id do NOT belong here: an occupant can change mid-window
--- (temporal-realism §5.2), so stamping a single "current occupant" onto every
--- row for a usage_point is wrong by construction once that happens. A
+-- follows (service point-keyed, no denormalized customer_id). account_id/
+-- customer_id do NOT belong here: a customer can change mid-window
+--, so stamping a single "current customer" onto every
+-- row for a service point is wrong by construction once that happens. A
 -- consumer that needs the billing account for a period joins
 -- dim_service_agreement itself (as-of the period's own date), the same
 -- pattern fact_meter_readings_monthly.sql uses.
@@ -38,10 +38,10 @@ WITH up_attr AS (
   -- Structural only: a usage point's service_point_id/premise_id never
   -- change, so this is a plain lookup, not an as-of resolution.
   SELECT
-    usage_point_id,
-    abs(xxhash64(usage_point_id)) AS service_point_id,
-    abs(xxhash64(premise_id))     AS premise_id
-  FROM ${customer_master_schema}.raw_usage_point
+    service_point_id                AS raw_service_point_id,
+    abs(xxhash64(service_point_id)) AS service_point_id,
+    abs(xxhash64(premise_id))       AS premise_id
+  FROM ${customer_master_schema}.raw_service_point
 )
 
 SELECT
@@ -60,7 +60,7 @@ SELECT
   COUNT(DISTINCT CAST(m.timestamp_utc AS DATE))                       AS n_days_in_window,
   current_timestamp() AS _ingested_at
 FROM ${ami_schema}.raw_meter_readings m
-JOIN up_attr a ON a.usage_point_id = m.usage_point_id
+JOIN up_attr a ON a.raw_service_point_id = m.service_point_id
 GROUP BY
   a.service_point_id, a.premise_id,
   DATE_FORMAT(m.timestamp_utc, 'yyyy-MM'),

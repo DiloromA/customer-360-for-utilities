@@ -9,11 +9,11 @@
 
 # COMMAND ----------
 
-import dlt
+from pyspark import pipelines as dp
 from pyspark.sql import functions as F
 
 
-@dlt.table(
+@dp.materialized_view(
     name="raw_load_profiles_tidy",
     comment=(
         "Tidy (long) format NREL End-Use Load Profiles. "
@@ -24,7 +24,7 @@ from pyspark.sql import functions as F
     ),
 )
 def load_profiles_tidy():
-    raw = dlt.read("raw_load_profiles")
+    raw = spark.read.table("raw_load_profiles")
     # Only electricity end-use load shapes are consumed downstream (AMI filters
     # `load_shape LIKE 'out_electricity_%'`). Unpivoting the gas/propane/fuel-oil/
     # emissions/loads columns too would multiply this table several-fold for no use.

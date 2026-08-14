@@ -48,7 +48,6 @@ dbutils.widgets.text("force_download", "false")
 _force_download = dbutils.widgets.get("force_download").strip().lower() == "true"
 
 spark.sql(f"USE CATALOG `{catalog}`")
-spark.sql("USE SCHEMA `default`")
 
 print(f"Catalog: {catalog}")
 print(f"Schema:  {schema}")

@@ -12,6 +12,11 @@
 
 dbutils.widgets.text("catalog", "main")
 dbutils.widgets.text("schema", "customer_360")
+# "false" on a governed workspace whose UC tag policy rejects our tag values
+#. When false, this notebook still
+# applies COLUMN COMMENTs but skips the `demo` UC tag. Kept in sync with the
+# databricks.yml data_asset_tags var (asserted in check-release-config.py).
+dbutils.widgets.text("apply_data_asset_tags", "true")
 
 import re
 
@@ -26,6 +31,7 @@ def _check_id(value, label):
 
 catalog = _check_id(dbutils.widgets.get("catalog").strip(), "catalog")
 schema = _check_id(dbutils.widgets.get("schema").strip(), "schema")
+APPLY_TAGS = dbutils.widgets.get("apply_data_asset_tags").strip().lower() == "true"
 
 spark.sql(f"USE CATALOG `{catalog}`")
 spark.sql(f"USE SCHEMA `{schema}`")
@@ -99,21 +105,27 @@ taggable_tables = [
 
 print(f"Discovered {len(discovered)} objects; tagging {len(taggable_tables)} tables.")
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+if not APPLY_TAGS:
+    print(
+        "apply_data_asset_tags=false — skipping UC tags "
+        "(governed workspace tag policy). Column comments still applied below."
+    )
+else:
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
-tag_ok = 0
-tag_fail = 0
-with ThreadPoolExecutor(max_workers=8) as pool:
-    futures = {pool.submit(apply_uc_tags, t): t for t in taggable_tables}
-    for future in as_completed(futures):
-        table_name = futures[future]
-        result = future.result()
-        if result == "ok":
-            tag_ok += 1
-        else:
-            tag_fail += 1
-            print(f"  TAG FAILED: {table_name}: {result}")
-print(f"\nTags: {tag_ok} applied, {tag_fail} failed")
+    tag_ok = 0
+    tag_fail = 0
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = {pool.submit(apply_uc_tags, t): t for t in taggable_tables}
+        for future in as_completed(futures):
+            table_name = futures[future]
+            result = future.result()
+            if result == "ok":
+                tag_ok += 1
+            else:
+                tag_fail += 1
+                print(f"  TAG FAILED: {table_name}: {result}")
+    print(f"\nTags: {tag_ok} applied, {tag_fail} failed")
 
 # COMMAND ----------
 
@@ -129,9 +141,11 @@ COLUMN_COMMENTS = {
     "dim_customer": {
         "customer_id": "Durable BIGINT customer key (xxhash64 of the raw customer string).",
         "customer_number": "Natural customer key (the raw human-readable id).",
-        "customer_type": "residential | commercial party type.",
-        "n_premises_owned": "Number of premises this customer holds across their accounts.",
-        "is_prior_occupant": "True if a former occupant who carries profile but no fact activity in the display window.",
+        "customer_type": "residential | commercial_standalone | commercial_chain | commercial_subsidiary | commercial_parent | landlord_portfolio.",
+        "customer_name": "Fictional org label for commercial_parent rows; NULL for all other customer types (PII-free policy).",
+        "n_premises_owned": "Number of premises this customer directly holds across their accounts.",
+        "n_premises_portfolio": "For commercial_parent: total premises across all subsidiaries. For all other types: same as n_premises_owned.",
+        "is_prior_customer": "True if a former customer who carries profile but no fact activity in the display window.",
         "customer_class": "Residential | Commercial.",
         "income_band": "ACS-derived income band (under_25k .. over_200k).",
         "household_size": "Household size 1-6 (residential only; NULL for commercial).",
@@ -162,8 +176,6 @@ COLUMN_COMMENTS = {
         "account_number": "Natural account key the app searches and deep-links by.",
         "customer_id": "Durable BIGINT key of the owning customer (joins dim_customer).",
         "customer_number": "Natural key of the owning customer.",
-        "premise_id": "Durable BIGINT premise key (joins dim_premise); NULL for corporate-parent accounts.",
-        "premise_number": "Natural premise key (FEMA UUID); NULL for corporate-parent accounts.",
         "parent_account_id": "Durable BIGINT key of the consolidated-billing parent account.",
         "account_group": "standard | consolidated_billing | corporate_parent.",
         "customer_class": "Residential | Commercial.",
@@ -181,8 +193,9 @@ COLUMN_COMMENTS = {
         "_ingested_at": _INGESTED_AT,
     },
     "dim_premise": {
-        "premise_id": "Durable BIGINT premise key (xxhash64 of the raw premise string).",
-        "premise_number": "Natural premise key (FEMA UUID).",
+        "premise_id": "Durable BIGINT premise key (xxhash64 of the canonical unbraced UUID).",
+        "premise_number": "Natural premise key — canonical unbraced lowercase UUID (e.g. 36635486-93f7-...).",
+        "source_building_id": "Raw FEMA source building id (braced UUID, for lineage).",
         "occupancy_class": "Residential | Commercial.",
         "primary_occupancy": "Raw FEMA primary-occupancy subtype.",
         "building_subtype": "ResStock-aligned building type (Single-Family Detached / Multi-Family / Mobile Home / Small/Medium/LargeOffice).",
@@ -217,11 +230,12 @@ COLUMN_COMMENTS = {
         "_ingested_at": _INGESTED_AT,
     },
     "dim_service_point": {
-        "service_point_id": "Durable BIGINT service-point key (xxhash64 of the raw usage-point string).",
-        "service_point_number": "Natural service-point key (usage-point id).",
+        "service_point_id": "Durable BIGINT service-point key (xxhash64 of the raw service-point string).",
+        "service_point_number": "Natural service-point key (raw service_point id).",
         "premise_id": "Durable BIGINT premise key (joins dim_premise).",
-        "service_location_number": "Natural key of the originating service location.",
-        "usage_point_type": "residential_single_meter | commercial_small | commercial_large | other.",
+        "service_location_number": "Natural key of the originating premise service attrs record.",
+        "commodity": "always 'electric'. This model covers electric service only; gas is out of scope.",
+        "service_point_type": "residential_single_meter | commercial_small | commercial_large | other.",
         "phase_code": "Electrical phase (single_phase | three_phase).",
         "nominal_service_voltage": "Nominal service voltage in volts.",
         "amperage_service_size": "Service amperage rating.",
@@ -236,8 +250,8 @@ COLUMN_COMMENTS = {
     },
     "dim_meter": {
         "meter_id": "Durable BIGINT meter key (xxhash64 of the raw meter string).",
-        "meter_number": "Natural meter key (end-device-asset id).",
-        "service_point_id": "Durable BIGINT service-point key this meter is associated with (joins dim_service_point).",
+        "meter_number": "Natural meter key (raw meter id).",
+        "commodity": "always 'electric'. This model covers electric service only; gas is out of scope.",
         "meter_seq": "Sequence number of this meter at the service point (1 = original).",
         "is_replacement": "True if this is a swap-in replacement meter.",
         "serial_number": "Synthesized meter serial number.",
@@ -336,6 +350,38 @@ COLUMN_COMMENTS = {
         "_ingested_at": _INGESTED_AT,
     },
     # ── Bridges & temporal ──────────────────────────────────────────
+    "bridge_customer_hierarchy": {
+        "hierarchy_link_id": "Deterministic surrogate key (md5 of parent+child customer_id strings).",
+        "parent_customer_id": "Durable BIGINT key of the parent-tier customer (joins dim_customer).",
+        "child_customer_id": "Durable BIGINT key of the subsidiary customer (joins dim_customer).",
+        "relationship_type": "Nature of the relationship — currently 'subsidiary'; extensible for franchise/JV/managed-by.",
+        "valid_from": "Start of the relationship window (half-open interval).",
+        "valid_to": "End of the relationship window (NULL = currently active).",
+        "is_current": "True where valid_to IS NULL.",
+        "_ingested_at": _INGESTED_AT,
+    },
+    "bridge_customer_account": {
+        "customer_account_link_id": "Durable BIGINT link key (xxhash64 of customer_id + account_id + valid_from).",
+        "customer_id": "Durable BIGINT customer key (joins dim_customer).",
+        "account_id": "Durable BIGINT account key (joins dim_account).",
+        "valid_from": "Start of the customer-ownership window (half-open interval).",
+        "valid_to": "End of the window (NULL = currently active).",
+        "is_current": "True where valid_to IS NULL.",
+        "_ingested_at": _INGESTED_AT,
+    },
+    "hierarchy_version": {
+        "hierarchy_version_id": "Durable BIGINT path key (xxhash64 of root+customer+account+premise+sp+meter+valid_from).",
+        "root_customer_id": "Portfolio parent valid during this interval; equals customer_id when no parent hierarchy applies.",
+        "customer_id": "Durable BIGINT customer key (joins dim_customer).",
+        "account_id": "Durable BIGINT account key (joins dim_account).",
+        "premise_id": "Durable BIGINT premise key (joins dim_premise).",
+        "service_point_id": "Durable BIGINT service-point key (joins dim_service_point).",
+        "meter_id": "Durable BIGINT meter key; NULL when no meter was installed during this interval.",
+        "valid_from": "Start of the interval during which the full path was stable (half-open).",
+        "valid_to": "End of the interval (NULL = currently active).",
+        "is_current": "True where valid_to IS NULL.",
+        "_ingested_at": _INGESTED_AT,
+    },
     "bridge_account_premise": {
         "account_premise_link_id": "Durable BIGINT link key (xxhash64 of the raw link string).",
         "account_premise_link_number": "Natural link key.",
@@ -343,12 +389,12 @@ COLUMN_COMMENTS = {
         "account_number": "Natural account key.",
         "premise_id": "Durable BIGINT premise key (joins dim_premise).",
         "customer_id": "Durable BIGINT customer key (joins dim_customer).",
-        "link_start_date": "Start of the occupancy/billing-responsibility window.",
+        "link_start_date": "Start of the tenancy/billing-responsibility window.",
         "link_end_date": "End of the window (NULL while current).",
-        "is_current": "True for the live link (current occupant).",
+        "is_current": "True for the live link (current customer).",
         "link_status": "Link status.",
         "billing_responsibility_flag": "True if this account was billing-responsible for the premise.",
-        "occupancy_type": "Occupancy type for the link.",
+        "tenancy_type": "Tenancy type for the link.",
         "link_termination_reason": "Reason the link ended (NULL while current).",
         "_ingested_at": _INGESTED_AT,
     },
@@ -359,8 +405,8 @@ COLUMN_COMMENTS = {
         "basis": "owner_pays (chain consolidated billing) | owner_occupied | landlord_agreement.",
         "display_name": "Readable label populated only for a few showcase parties; NULL elsewhere.",
         "owns_from": "Start of the ownership window.",
-        "owns_to": "End of the ownership window (NULL — nothing in this dataset models a sale).",
-        "is_current": "True for every row (no modeled ownership changes).",
+        "owns_to": "End of the ownership window (NULL for current owners; set when a property is sold or transferred).",
+        "is_current": "True for active ownership rows (valid_to IS NULL). False for closed rows where ownership ended.",
         "_ingested_at": _INGESTED_AT,
     },
     "meter_installation": {
@@ -388,7 +434,7 @@ COLUMN_COMMENTS = {
         "service_point_id": "Durable BIGINT service-point key (NULL for move events).",
         "service_agreement_id": "Durable BIGINT agreement key (populated for rate-switch events).",
         "meter_id": "Durable BIGINT meter key (populated for meter-swap events).",
-        "detail": "Event-specific detail string (e.g. to_rate=, occupancy=, to_meter=).",
+        "detail": "Event-specific detail string (e.g. to_rate=, tenancy=, to_meter=).",
         "_ingested_at": _INGESTED_AT,
     },
     "dim_customer_history": {
@@ -406,7 +452,7 @@ COLUMN_COMMENTS = {
         "liheap_eligible": "LIHEAP eligibility at this version.",
         "customer_since_date": "Date the customer relationship started.",
         "critical_care_flag": "Critical-care status at this version (the SCD2-tracked attribute).",
-        "is_prior_occupant": "True if a former occupant.",
+        "is_prior_customer": "True if a former customer.",
         "effective_from": "Start of this version's validity window.",
         "effective_to": "End of the validity window (NULL = current version).",
         "is_current": "True for the current version.",
@@ -417,7 +463,7 @@ COLUMN_COMMENTS = {
         "account_id": "Durable BIGINT account key (joins dim_account).",
         "account_number": "Natural account key.",
         "customer_id": "Durable BIGINT customer key.",
-        "premise_id": "Durable BIGINT premise key (NULL for corporate-parent accounts).",
+        "premise_id": "Durable BIGINT premise key as of this version's window (history row = as-of stamp; dim_account no longer carries this column).",
         "parent_account_id": "Durable BIGINT consolidated-billing parent key.",
         "account_group": "standard | consolidated_billing | corporate_parent.",
         "customer_class": "Residential | Commercial.",
@@ -433,7 +479,35 @@ COLUMN_COMMENTS = {
         "is_current": "True for the current version.",
         "_ingested_at": _INGESTED_AT,
     },
+    "dim_premise_history": {
+        "premise_history_id": "Durable BIGINT version key (xxhash64 of premise_id + valid_from).",
+        "premise_id": "Durable BIGINT premise key (joins dim_premise).",
+        "valid_from": "Start of the attribute-version window (half-open interval).",
+        "valid_to": "End of the window (NULL = currently active).",
+        "is_current": "True where valid_to IS NULL.",
+        "service_status": "Service status at this version: active | inactive | demolished.",
+        "service_class": "Service class at this version: Residential | Commercial.",
+        "primary_occupancy": "Primary occupancy type at this version.",
+        "building_subtype": "ResStock-aligned building subtype at this version.",
+        "_ingested_at": _INGESTED_AT,
+    },
     # ── Facts ───────────────────────────────────────────────────────
+    "fact_work_order": {
+        "work_order_id": "Natural work-order key.",
+        "premise_id": "Durable BIGINT premise key (always non-NULL; joins dim_premise).",
+        "service_point_id": "Durable BIGINT service-point key (NULL for premise-only orders).",
+        "meter_id": "Durable BIGINT meter key (NULL for premise-only orders).",
+        "customer_id": "Durable BIGINT customer key resolved as-of the work timestamp via hierarchy_version (nullable).",
+        "account_id": "Durable BIGINT account key resolved as-of the work timestamp via hierarchy_version (nullable).",
+        "work_type": "meter_exchange | meter_investigation | premise_inspection | service_disconnect | service_reconnect | new_service | DER_inspection.",
+        "status": "open | completed | cancelled.",
+        "priority": "routine | urgent | emergency.",
+        "created_at": "Timestamp the work order was created.",
+        "scheduled_at": "Timestamp the work order was scheduled.",
+        "completed_at": "Timestamp the work order was completed (NULL for open orders).",
+        "created_date_key": "yyyymmdd date key for the creation timestamp (joins dim_date).",
+        "_ingested_at": _INGESTED_AT,
+    },
     "fact_meter_readings_daily": {
         "service_point_id": "Durable BIGINT service-point key (joins dim_service_point).",
         "premise_id": "Durable BIGINT premise key (joins dim_premise). Structural only — a usage point's premise never changes.",
@@ -445,7 +519,6 @@ COLUMN_COMMENTS = {
         "kwh_ev": "EV-charging kWh contribution.",
         "kwh_pv": "PV-generation kWh.",
         "kwh_hp": "Heat-pump heating kWh contribution.",
-        "kwh_bess": "Battery dispatch kWh (signed: + grid-to-charge, - discharge-to-home).",
         "kwh_tstat_savings": "Demand-response HVAC dampening kWh (negative).",
         "peak_hour_kwh": "Maximum single-hour kWh in the day.",
         "peak_hour_of_day": "Hour 0-23 when the daily peak occurred.",
@@ -466,7 +539,6 @@ COLUMN_COMMENTS = {
         "kwh_ev": "EV-charging kWh for the month.",
         "kwh_pv": "PV-generation kWh for the month.",
         "kwh_hp": "Heat-pump heating kWh for the month.",
-        "kwh_bess": "Battery dispatch kWh for the month (signed).",
         "kwh_tstat_savings": "Demand-response HVAC dampening kWh for the month (negative).",
         "month_peak_hour_kwh": "Maximum single-hour kWh in the month.",
         "days_in_month_with_data": "Distinct days with readings in the month.",
@@ -535,6 +607,8 @@ COLUMN_COMMENTS = {
         "complaint_id": "Natural complaint key (one row per complaint).",
         "customer_id": "Durable BIGINT customer key (joins dim_customer).",
         "account_id": "Durable BIGINT account key (joins dim_account).",
+        "premise_id": "Durable BIGINT premise key (nullable; resolved via ordered evidence chain — see premise_attribution_method).",
+        "premise_attribution_method": "How premise_id was resolved: driver_outage | driver_bill | unique_account_link | unresolved.",
         "complaint_date": "Date the complaint was filed.",
         "date_key": "yyyymmdd date key (joins dim_date).",
         "channel": "phone | online_chat | email | social_media | in_person | mail.",
@@ -709,10 +783,10 @@ COLUMN_COMMENTS = {
     },
     "fact_der_adoption": {
         "customer_id": "Durable BIGINT customer key (joins dim_customer).",
-        "device_type": "EV | PV | BESS | HEAT_PUMP | SMART_TSTAT.",
+        "device_type": "EV | PV | HEAT_PUMP | SMART_TSTAT.",
         "install_date_alt": "Reserved placeholder column from the UNION schema (always NULL).",
-        "install_date": "Date the device was installed (NULL for BESS).",
-        "system_size_kwh_or_dc": "EV battery kWh / PV kW DC / BESS kWh / HP tons / NULL for thermostat.",
+        "install_date": "Date the device was installed.",
+        "system_size_kwh_or_dc": "EV battery kWh / PV kW DC / HP tons / NULL for thermostat.",
         "device_subtype": "Type-specific subtype (vehicle class / inverter type / dispatch mode / HP type / thermostat brand).",
         "extra_attr": "Type-specific attribute (e.g. TOU enrollment for EV, net-metered flag for PV).",
         "_ingested_at": _INGESTED_AT,

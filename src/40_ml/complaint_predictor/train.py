@@ -95,8 +95,19 @@ import pandas as pd
 # as_of_date / history_months).
 SPLIT_DATE = (pd.Timestamp(as_of_date) - pd.DateOffset(months=6)).strftime("%Y-%m-%d")
 
+# Pull only the columns the model consumes (features + labels + the split key
+# + customer_id for the grouped early-stopping split) — not SELECT *. The
+# snapshot below still reads the full source table Spark-natively, so trimming
+# here only shrinks the driver-side pandas frame.
+_needed_cols = (
+    NUMERIC_FEATURES
+    + CATEGORICAL_FEATURES
+    + LABEL_COLUMNS
+    + ["bill_period_end", "customer_id"]
+)
 features_df = (
     spark.table(f"{catalog}.{schema}.ml_complaint_risk_features")
+    .select(*_needed_cols)
     .toPandas()
 )
 features_df["bill_period_end"] = pd.to_datetime(features_df["bill_period_end"])
@@ -119,15 +130,32 @@ FEATURE_COLUMNS = list(encoded.columns)
 print(f"Feature columns after encoding: {len(FEATURE_COLUMNS)}")
 
 # Persist the exact training snapshot (features + labels + split) for SQL.
-training_snapshot = features_df.copy()
-training_snapshot["split"] = train_mask.map({True: "train", False: "test"})
+# Written Spark-natively straight from the source feature table: a
+# createDataFrame(pandas) round-trip serializes the whole frame into one
+# broadcast RPC and blows spark.rpc.message.maxSize (256MB) at full scale.
+# The split column reuses the SAME SPLIT_DATE as train_mask above (not
+# feature_spec's stale default). Compare as timestamps to mirror the pandas
+# train_mask (features_df["bill_period_end"] <= pd.Timestamp(SPLIT_DATE)) exactly:
+# today bill_period_end is DATE (midnight), but a timestamp compare stays
+# faithful even if it ever gains a time-of-day, so the persisted split can't
+# drift from what the model actually trained on. NULL -> "test" in both engines.
+from pyspark.sql import functions as F
+
+snapshot_table = f"{catalog}.{schema}.ml_complaint_training_data"
 (
-    spark.createDataFrame(training_snapshot)
+    spark.table(f"{catalog}.{schema}.ml_complaint_risk_features")
+    .withColumn(
+        "split",
+        F.when(
+            F.col("bill_period_end").cast("timestamp") <= F.to_timestamp(F.lit(SPLIT_DATE)),
+            "train",
+        ).otherwise("test"),
+    )
     .write.mode("overwrite")
     .option("overwriteSchema", "true")
-    .saveAsTable(f"{catalog}.{schema}.ml_complaint_training_data")
+    .saveAsTable(snapshot_table)
 )
-print(f"Wrote ml_complaint_training_data ({len(training_snapshot)} rows)")
+print(f"Wrote {snapshot_table} ({spark.table(snapshot_table).count()} rows)")
 
 # COMMAND ----------
 
@@ -144,11 +172,45 @@ import xgboost as xgb
 from sklearn.calibration import calibration_curve
 from sklearn.metrics import average_precision_score, brier_score_loss, roc_auc_score
 
-# DataFrame (not numpy) so the boosters keep feature names; scoring
-# reloads via name → column alignment.
+# DataFrame (not numpy) so the DMatrices keep feature names; scoring reloads
+# via name → column alignment.
 X = encoded[FEATURE_COLUMNS].astype(float).fillna(0.0)
-X_train = X[train_mask.values].reset_index(drop=True)
-X_test = X[~train_mask.values].reset_index(drop=True)
+
+# ── Early-stopping validation split ───────────────────────────────────────────
+# Carve a validation slice OUT OF TRAIN (never the test set) so early stopping
+# has an honest stopping signal without peeking at the reported-metrics set.
+# Split by customer_id, not by row: the grain is customer × billing-cycle and a
+# customer's cycles are strongly autocorrelated, so a per-row split would put
+# the same customer on both sides and let the stopping signal leak. The test set
+# (post-SPLIT_DATE) stays completely untouched — every *_test_* metric below is
+# still measured on data the model never saw.
+_rng = np.random.RandomState(42)
+_train_customers = features_df.loc[train_mask.values, "customer_id"].unique()
+_n_val = max(int(round(0.10 * len(_train_customers))), 1)
+_val_customers = set(_rng.choice(_train_customers, size=_n_val, replace=False))
+_is_val_row = features_df["customer_id"].isin(_val_customers).values
+
+fit_mask = train_mask.values & ~_is_val_row  # trees are fit on this
+val_mask = train_mask.values & _is_val_row  # early stopping watches this
+test_mask = ~train_mask.values  # reported metrics only
+
+X_fit = X[fit_mask].reset_index(drop=True)
+X_val = X[val_mask].reset_index(drop=True)
+X_test = X[test_mask].reset_index(drop=True)
+print(
+    f"Fit rows: {len(X_fit)}  Val rows (early-stop): {len(X_val)}  "
+    f"Test rows: {len(X_test)}"
+)
+
+# ── Shared quantile sketch ────────────────────────────────────────────────────
+# The histogram cut points depend only on the feature matrix, which is identical
+# across all five heads — only the label changes. Building the QuantileDMatrix
+# once and reusing it (swapping the label per head via set_label) computes the
+# ~4M-row sketch a single time instead of 5×. X_val is quantized against the
+# SAME cuts (ref=dtrain); X_test is a plain DMatrix used for inference only.
+dtrain = xgb.QuantileDMatrix(X_fit, feature_names=FEATURE_COLUMNS)
+dval = xgb.QuantileDMatrix(X_val, feature_names=FEATURE_COLUMNS, ref=dtrain)
+dtest = xgb.DMatrix(X_test, feature_names=FEATURE_COLUMNS)
 
 mlflow.set_registry_uri("databricks-uc")
 mlflow.set_experiment(experiment_name)
@@ -170,23 +232,42 @@ def _lift_metrics(y_true: np.ndarray, y_proba: np.ndarray, frac: float = 0.05):
 
 
 boosters: dict[str, xgb.Booster] = {}
+best_iterations: dict[str, int] = {}
 head_metrics: dict[str, float] = {}
+
+# Cap on boosting rounds; early stopping usually lands well short of this.
+NUM_BOOST_ROUND = 400
+EARLY_STOPPING_ROUNDS = 40
+# Minimum positives the val slice needs before its aucpr is a trustworthy
+# early-stopping signal. Below this (a rare head at small iteration sample
+# sizes), fall back to a fixed full-length fit so the head is never crippled.
+MIN_VAL_POSITIVES = 5
 
 with mlflow.start_run(run_name="xgboost_complaint_predictor") as run:
     mlflow.log_param("split_date", SPLIT_DATE)
-    mlflow.log_param("n_train_rows", int(len(X_train)))
+    mlflow.log_param("n_train_rows", int(train_mask.sum()))
+    mlflow.log_param("n_fit_rows", int(len(X_fit)))
+    mlflow.log_param("n_val_rows", int(len(X_val)))
     mlflow.log_param("n_test_rows", int(len(X_test)))
     mlflow.log_param("n_features", len(FEATURE_COLUMNS))
+    mlflow.log_param("num_boost_round", NUM_BOOST_ROUND)
+    mlflow.log_param("early_stopping_rounds", EARLY_STOPPING_ROUNDS)
     mlflow.log_param("heads", ",".join(HEADS))
 
     for head, label_col in HEADS.items():
         y = features_df[label_col].astype(int).values
-        y_train, y_test = y[train_mask.values], y[~train_mask.values]
+        y_fit = y[fit_mask]
+        y_val = y[val_mask]
+        y_test = y[test_mask]
+
+        # Reuse the shared sketch; only the label differs per head.
+        dtrain.set_label(y_fit)
+        dval.set_label(y_val)
 
         # Monthly complaint rates run ~0.3%-4% per head. Full inverse ratio
         # over-corrects; sqrt is the standard middle ground (same recipe as
-        # ev_detector).
-        imbalance_ratio = (len(y_train) - y_train.sum()) / max(y_train.sum(), 1)
+        # ev_detector). Computed on the fit set the trees actually see.
+        imbalance_ratio = (len(y_fit) - y_fit.sum()) / max(y_fit.sum(), 1)
         params = {
             "objective": "binary:logistic",
             "learning_rate": 0.05,
@@ -194,57 +275,97 @@ with mlflow.start_run(run_name="xgboost_complaint_predictor") as run:
             "min_child_weight": 3,
             "subsample": 0.85,
             "colsample_bytree": 0.85,
-            "n_estimators": 400,
             "eval_metric": "aucpr",
-            "random_state": 42,
+            "tree_method": "hist",
+            "nthread": -1,
+            "seed": 42,
             "scale_pos_weight": math.sqrt(imbalance_ratio),
         }
 
-        model = xgb.XGBClassifier(**params)
-        model.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
-        test_proba = model.predict_proba(X_test)[:, 1]
+        # Use early stopping only when the val slice carries enough positives
+        # for a stable aucpr; otherwise train the full cap (the pre-early-stopping
+        # behavior) so a rare head at small sample sizes isn't halted at ~0 trees
+        # and promoted near-empty. At demo scale every head clears the threshold.
+        n_val_pos = int(y_val.sum())
+        n_fit_pos = int(y_fit.sum())
+        if n_val_pos >= MIN_VAL_POSITIVES and n_fit_pos > 0:
+            booster = xgb.train(
+                params,
+                dtrain,
+                num_boost_round=NUM_BOOST_ROUND,
+                evals=[(dval, "val")],
+                early_stopping_rounds=EARLY_STOPPING_ROUNDS,
+                verbose_eval=False,
+            )
+            best_iteration = int(booster.best_iteration)
+        else:
+            print(
+                f"[{head:8s}] early stopping OFF (val positives={n_val_pos} "
+                f"< {MIN_VAL_POSITIVES}); training full {NUM_BOOST_ROUND} rounds"
+            )
+            booster = xgb.train(
+                params, dtrain, num_boost_round=NUM_BOOST_ROUND, verbose_eval=False
+            )
+            best_iteration = NUM_BOOST_ROUND - 1  # serve/score with all trees
+        # Score test with only the trees up to the best round; serving uses the
+        # identical iteration_range (see the pyfunc wrapper below).
+        test_proba = booster.predict(dtest, iteration_range=(0, best_iteration + 1))
 
+        # roc_auc / average_precision / calibration need both classes present; a
+        # rare head's trailing-window test slice can be single-class at small
+        # sample sizes, so guard rather than crash the whole run.
+        two_class_test = len(np.unique(y_test)) > 1
         capture_5pct, lift_5pct = _lift_metrics(y_test, test_proba)
         metrics = {
             f"{head}_base_rate": float(y.mean()),
             f"{head}_scale_pos_weight": float(params["scale_pos_weight"]),
-            f"{head}_test_auc": float(roc_auc_score(y_test, test_proba)),
-            f"{head}_test_avg_precision": float(
-                average_precision_score(y_test, test_proba)
-            ),
+            f"{head}_best_iteration": float(best_iteration),
             f"{head}_test_brier": float(brier_score_loss(y_test, test_proba)),
             f"{head}_test_capture_at_5pct": capture_5pct,
             f"{head}_test_lift_at_5pct": lift_5pct,
         }
+        if two_class_test:
+            metrics[f"{head}_test_auc"] = float(roc_auc_score(y_test, test_proba))
+            metrics[f"{head}_test_avg_precision"] = float(
+                average_precision_score(y_test, test_proba)
+            )
+        else:
+            print(f"[{head:8s}] test slice single-class — skipping AUC/AP/calibration")
         mlflow.log_metrics(metrics)
 
         # Reliability curve — the app surfaces probabilities and tiers, so
         # calibration matters more than rank.
-        frac_pos, mean_pred = calibration_curve(
-            y_test, test_proba, n_bins=10, strategy="quantile"
-        )
-        mlflow.log_dict(
-            {
-                "mean_predicted": mean_pred.tolist(),
-                "fraction_positive": frac_pos.tolist(),
-            },
-            f"calibration_{head}.json",
-        )
+        if two_class_test:
+            frac_pos, mean_pred = calibration_curve(
+                y_test, test_proba, n_bins=10, strategy="quantile"
+            )
+            mlflow.log_dict(
+                {
+                    "mean_predicted": mean_pred.tolist(),
+                    "fraction_positive": frac_pos.tolist(),
+                },
+                f"calibration_{head}.json",
+            )
 
         # Sanity vs. the generator: each head should be dominated by its own
         # driver family (bill-shock / outage-minutes / previous-balance).
-        importance = dict(
-            zip(FEATURE_COLUMNS, model.feature_importances_.tolist())
-        )
+        # gain-weighted importance, normalized, with unused columns at 0.
+        raw_importance = booster.get_score(importance_type="gain")
+        _imp_total = sum(raw_importance.values()) or 1.0
+        importance = {
+            c: float(raw_importance.get(c, 0.0)) / _imp_total for c in FEATURE_COLUMNS
+        }
         mlflow.log_dict(importance, f"feature_importance_{head}.json")
         top5 = sorted(importance.items(), key=lambda kv: -kv[1])[:5]
 
-        boosters[head] = model.get_booster()
+        boosters[head] = booster
+        best_iterations[head] = best_iteration
         head_metrics.update(metrics)
         print(
             f"[{head:8s}] base={y.mean():.2%} "
-            f"auc={metrics[f'{head}_test_auc']:.3f} "
-            f"ap={metrics[f'{head}_test_avg_precision']:.3f} "
+            f"best_iter={best_iteration} "
+            f"auc={metrics.get(f'{head}_test_auc', float('nan')):.3f} "
+            f"ap={metrics.get(f'{head}_test_avg_precision', float('nan')):.3f} "
             f"capture@5%={capture_5pct:.1%}"
         )
         print(f"           top features: {[k for k, _ in top5]}")
@@ -267,6 +388,13 @@ with mlflow.start_run(run_name="xgboost_complaint_predictor") as run:
     with open(columns_path, "w") as f:
         json.dump(FEATURE_COLUMNS, f)
     artifacts["feature_columns"] = columns_path
+    # Persist each head's best round so serving predicts with the SAME trees
+    # early stopping selected — a reloaded native Booster otherwise scores with
+    # every round it happened to run past the optimum.
+    best_iter_path = os.path.join(artifact_dir, "best_iterations.json")
+    with open(best_iter_path, "w") as f:
+        json.dump(best_iterations, f)
+    artifacts["best_iterations"] = best_iter_path
 
     class ComplaintRiskModel(mlflow.pyfunc.PythonModel):
         def load_context(self, context):
@@ -276,6 +404,8 @@ with mlflow.start_run(run_name="xgboost_complaint_predictor") as run:
 
             with open(context.artifacts["feature_columns"]) as fh:
                 self.feature_columns = _json.load(fh)
+            with open(context.artifacts["best_iterations"]) as fh:
+                self.best_iterations = _json.load(fh)
             self.boosters = {}
             for key, path in context.artifacts.items():
                 if key.startswith("booster_"):
@@ -293,17 +423,22 @@ with mlflow.start_run(run_name="xgboost_complaint_predictor") as run:
                 .fillna(0.0)
             )
             dmat = _xgb.DMatrix(aligned, feature_names=self.feature_columns)
-            return _pd.DataFrame(
-                {f"p_{head}": booster.predict(dmat)
-                 for head, booster in self.boosters.items()}
-            )
+            out = {}
+            for head, booster in self.boosters.items():
+                best_it = self.best_iterations.get(head)
+                # (0, 0) is XGBoost's "use every tree" sentinel — the fallback
+                # if a best round somehow wasn't recorded.
+                rng = (0, int(best_it) + 1) if best_it is not None else (0, 0)
+                out[f"p_{head}"] = booster.predict(dmat, iteration_range=rng)
+            return _pd.DataFrame(out)
 
     wrapper = ComplaintRiskModel()
-    input_example = X_train.head(5)
+    input_example = X_fit.head(5)
     output_example = pd.DataFrame(
         {
             f"p_{head}": booster.predict(
-                xgb.DMatrix(input_example, feature_names=FEATURE_COLUMNS)
+                xgb.DMatrix(input_example, feature_names=FEATURE_COLUMNS),
+                iteration_range=(0, best_iterations[head] + 1),
             )
             for head, booster in boosters.items()
         }

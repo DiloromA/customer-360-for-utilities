@@ -8,7 +8,7 @@
 --   pct_gap         — % of eligible customers not yet enrolled
 --                     (the "underserved" metric)
 --
--- Customers are the current occupant per premise (bridge_account_premise where
+-- Customers are the current customer per premise (bridge_account_premise where
 -- is_current → dim_customer).
 
 -- @param program_id  STRING
@@ -21,6 +21,7 @@
 -- @param usage_bands      STRING
 -- @param engagement_tiers STRING
 -- @param issue_flags      STRING
+-- @param grain            STRING  -- 'premise' | 'customer'; default 'customer'
 
 WITH program AS (
   SELECT program_id, customer_segment
@@ -53,6 +54,13 @@ enrolled_customers AS (
     AND enrollment_status IN ('active', 'completed')
 ),
 
+enrolled_premises AS (
+  SELECT DISTINCT premise_id
+  FROM {{catalog}}.{{schema}}.fact_program_enrollment
+  WHERE program_id = :program_id
+    AND enrollment_status IN ('active', 'completed')
+),
+
 filter_lists AS (
   SELECT
     split(:customer_classes, ',') AS class_list,
@@ -68,10 +76,15 @@ cell_rollup AS (
     COUNT(*)                                          AS n_customers,
     SUM(CASE WHEN LOWER(c.customer_class) = LOWER(pr.customer_segment) THEN 1 ELSE 0 END)
                                                        AS n_eligible,
-    SUM(CASE WHEN e.customer_id IS NOT NULL THEN 1 ELSE 0 END) AS n_enrolled,
+    SUM(CASE
+          WHEN :grain = 'premise' THEN (CASE WHEN ep.premise_id  IS NOT NULL THEN 1 ELSE 0 END)
+          ELSE                         (CASE WHEN ec.customer_id IS NOT NULL THEN 1 ELSE 0 END)
+        END)                                            AS n_enrolled,
     SUM(CASE
           WHEN LOWER(c.customer_class) = LOWER(pr.customer_segment)
-           AND e.customer_id IS NULL THEN 1 ELSE 0
+           AND (CASE WHEN :grain = 'premise' THEN ep.premise_id  IS NULL
+                     ELSE                         ec.customer_id IS NULL END)
+          THEN 1 ELSE 0
         END)                                            AS n_not_enrolled_eligible,
     AVG(p.latitude)                                     AS centroid_lat,
     AVG(p.longitude)                                    AS centroid_lon
@@ -81,7 +94,8 @@ cell_rollup AS (
   JOIN {{catalog}}.{{schema}}.dim_customer c ON c.customer_id = b.customer_id
   CROSS JOIN program pr
   CROSS JOIN filter_lists f
-  LEFT JOIN enrolled_customers e ON e.customer_id = c.customer_id
+  LEFT JOIN enrolled_customers ec ON ec.customer_id = c.customer_id
+  LEFT JOIN enrolled_premises  ep ON ep.premise_id  = p.premise_id
   WHERE
     (:customer_classes = '' OR array_contains(f.class_list, c.customer_class))
     AND (:usage_bands       = '' OR array_contains(f.usage_list, c.usage_band))

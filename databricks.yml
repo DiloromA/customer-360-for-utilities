@@ -37,7 +37,7 @@ variables:
     description: "Genie space ID for the app's 'Ask the Map'. Created by the genie_space setup job; leave blank on first deploy, then set."
     default: ""
 
-  # ── Scope knobs (to be unified by the boundary spine — see ARCHITECTURE.md §10) ─
+  # ── Scope knobs (to be unified by the boundary spine) ─
   states_filter:
     description: "FEMA building download: comma-separated state names. Default Michigan (the demo territory)."
     default: "Michigan"
@@ -75,6 +75,20 @@ variables:
     description: "The demo's 'now' — anchors all effective-dating and the trailing history_months display window."
     default: "2018-12-31"
 
+  # ── Simultaneous multi-site customer population knobs ────────────────
+  n_guaranteed_chains_floor:
+    description: "Minimum count of multi-site commercial chains regardless of scale. Effective count = GREATEST(this, commercial_premises × chain_fraction). 0 disables chains entirely."
+    default: "5"
+  chain_fraction:
+    description: "Multi-site commercial chains as a fraction of commercial premises; takes over from the floor above ~50 commercial premises."
+    default: "0.10"
+  n_second_homes_floor:
+    description: "Minimum count of residential households occupying two current premises regardless of scale. Effective count = GREATEST(this, residential_premises × second_home_fraction)."
+    default: "15"
+  second_home_fraction:
+    description: "Residential second homes as a fraction of residential premises; takes over from the floor above ~1,250 residential premises."
+    default: "0.012"
+
   # ── Runtime endpoints / secrets ───────────────────────────────────────
   llm_endpoint:
     description: "Foundation Model API endpoint for verbatim generation (complaints/social/surveys)."
@@ -82,6 +96,73 @@ variables:
   download_concurrency:
     description: "Max parallel FEMA state downloads."
     default: "12"
+
+  # ── Per-target release config (auth mode + workspace policy) ──────────
+  # The default deployment pattern is OBO ("on behalf of user"): dev / external /
+  # internal run analytics reads AS THE SIGNED-IN VIEWER, so Unity Catalog
+  # governance applies per person — each viewer sees only the data their own
+  # grants allow, and fails closed otherwise. `viewer_grantee` (default
+  # `account users`) is the principal granted read access; a customer narrows it
+  # to their own utility's group on adoption. The variable defaults below are the
+  # SP shape (the app's own service principal reads) — used by the vestigial
+  # `prod` target and available as a zero-setup fallback. internal additionally
+  # turns tags off to fit a governed tag policy.
+  app_auth_mode:
+    description: "sp | obo. Drives the grant scripts, the Genie ACL, and the app's token preference (OBO reads as the viewer; SP reads as the app service principal). Must never contradict app_user_api_scopes — asserted in contract_assertions.py."
+    default: "sp"
+  app_user_api_scopes:
+    description: >-
+      OBO scopes granted to the forwarded end-user token on the app resource.
+      EMPTY = service-principal mode (the app's own SP does the reading).
+      Non-empty = OBO. Keep in sync with app_auth_mode.
+    type: complex
+    default: []
+  viewer_grantee:
+    description: >-
+      OBO only: the principal granted SELECT on the schema and CAN_RUN on the
+      Genie space, since reads run as the viewer. Ignored in sp mode. An '@' in
+      the value is treated as a user, otherwise a group (e.g. 'account users').
+    default: "account users"
+  data_asset_tags:
+    description: >-
+      UC tags applied to curated/ML data assets via the resource tags: fields.
+      Set to {} for a workspace with a governed tag policy that would reject
+      these values.
+    type: complex
+    default:
+      demo: customer-360-for-utilities
+  apply_data_asset_tags:
+    description: >-
+      Scalar mirror of "data_asset_tags is non-empty", threaded into the
+      notebooks that apply UC tags with `ALTER TABLE ... SET TAGS` (curated +
+      ML table_comments, metric_views) — the declarative resource `tags:` fields
+      read data_asset_tags directly, but a complex var cannot be threaded into a
+      notebook base_parameter (DAB: "expected string, found sequence"), so this
+      scalar carries the same intent. "true" = apply our tags; "false" = skip
+      them (a governed workspace whose tag policy rejects our values). Must agree
+      with data_asset_tags being non-empty — asserted in check-release-config.py.
+    default: "true"
+  schema_properties:
+    description: "Properties on the demo schema. Set to {} where a governed tag/property policy would reject them."
+    type: complex
+    default:
+      managed_by: customer-360-for-utilities
+      area: customer_360
+
+# Demo browsability: DAB applies this top-level grant to every supported resource
+# this bundle DECLARES — here the jobs + pipelines (→ CAN_VIEW) and the app
+# (CAN_VIEW maps to CAN_USE, so anyone in `users` can OPEN the app; harmless under
+# OBO — a viewer with no UC grant fails closed). It does NOT cover the MLflow
+# experiment or the UC models (not declared bundle resources — those are granted
+# out-of-band; see app/scripts/grant-permissions.sh). It is
+# also separate from DATA access (UC SELECT/EXECUTE on the schema).
+# ⚠️ `users` is the WORKSPACE-local all-users group. It exists on most standard
+# workspaces, but a federated/governed workspace may only have account groups —
+# confirm `users` exists there before deploying (else the apply fails). Applies
+# to every target.
+permissions:
+  - level: CAN_VIEW
+    group_name: users
 
 # The app's built deploy tree is gitignored, but must still be uploaded to the
 # workspace on `bundle deploy`. sync.include force-includes it past .gitignore.
@@ -97,13 +178,78 @@ resources:
     demo_schema:
       name: ${var.schema}
       catalog_name: ${var.catalog}
-      properties:
-        managed_by: customer-360-for-utilities
-        area: customer_360
+      properties: ${var.schema_properties}
 
 targets:
   dev:
     mode: development
     default: true
+    # OBO: the dev target's standing demo runs on-behalf-of-user — reads execute
+    # AS THE VIEWER, granted to `account users` (see app/scripts/grant-permissions.sh
+    # obo mode). Matches external/internal; only `prod` is SP.
+    variables:
+      app_auth_mode: "obo"
+      app_user_api_scopes:
+        - sql
+        - dashboards.genie
+    resources:
+      apps:
+        customer_360:
+          user_api_scopes: ${var.app_user_api_scopes}
   prod:
     mode: production
+    # Per-target root_path so production targets never share a deploy tree (the
+    # global ~/${bundle.name} is fine for dev but production mode requires this).
+    workspace:
+      root_path: ~/.bundle/${bundle.name}/${bundle.target}
+
+  # External / Solution-Accelerator deployment: OBO (the default pattern), tags on.
+  # Reads run AS THE VIEWER, so Unity Catalog governance applies per person — the
+  # recommended posture for real data. `viewer_grantee` is the per-environment
+  # knob — `account users` for the demo, narrowed to a specific utility's group
+  # when a customer adopts. Deploying this template needs OBO enabled in the
+  # workspace and its users granted read access; for a zero-setup evaluation you
+  # can instead set app_auth_mode: sp + app_user_api_scopes: [] and drop the
+  # user_api_scopes override below.
+  external:
+    mode: production
+    # Production targets need a per-target root_path so they never clobber each
+    # other (or dev). ${bundle.target} keeps each target's copy isolated.
+    workspace:
+      root_path: ~/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      app_auth_mode: "obo"
+      app_user_api_scopes:
+        - sql
+        - dashboards.genie
+      viewer_grantee: "account users"
+    # OBO needs the forwarded-token scopes on the app resource (the base app.yml
+    # omits the field to dodge the Terraform []→null bug on sp targets).
+    resources:
+      apps:
+        customer_360:
+          user_api_scopes: ${var.app_user_api_scopes}
+
+  # Databricks-internal demo workspace: OBO is required here by workspace policy
+  # (sp mode is not permitted), and a governed tag policy rejects our tag values,
+  # so this target turns tags off. Otherwise identical to the external target.
+  internal:
+    mode: production
+    workspace:
+      root_path: ~/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      app_auth_mode: "obo"
+      app_user_api_scopes:
+        - sql
+        - dashboards.genie
+      data_asset_tags: {}
+      apply_data_asset_tags: "false"
+      schema_properties: {}
+    # OBO needs the forwarded-token scopes on the app resource. Every OBO target
+    # sets this (dev/external/internal); only the SP `prod` target omits it (an
+    # empty list trips a Terraform provider []→null bug). Wired to the var so
+    # check-release-config.py confirms the field matches app_user_api_scopes.
+    resources:
+      apps:
+        customer_360:
+          user_api_scopes: ${var.app_user_api_scopes}

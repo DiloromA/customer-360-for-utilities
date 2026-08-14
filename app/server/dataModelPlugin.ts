@@ -2,7 +2,7 @@
 // information_schema, scoped to a layer: the curated star (selected by its
 // dim_/fact_/bridge_ role prefixes) or a single naming-convention prefix
 // (raw_/ml_/app_). Declaring FOREIGN KEY constraints across the core star
-// (design doc §8) is rolling out table by table — those declared edges are
+// is rolling out table by table — those declared edges are
 // read straight from information_schema.referential_constraints and rendered
 // solid/authoritative. Everywhere else (not yet hardened), a non-PK column
 // whose name matches a known single-column PK's name is drawn as an INFERRED
@@ -21,7 +21,7 @@ const CACHE_TTL_MS = 5 * 60 * 1000;
 
 // Documented exceptions where a non-PK column's name doesn't literally match
 // its referenced table's PK column, so convention-based inference alone
-// would miss the edge. Keep this list small and explicit — see design doc §8.
+// would miss the edge. Keep this list small and explicit.
 const COLUMN_ALIAS: Record<string, string> = {
   // fact_customer_billing.rate_schedule → dim_rate_schedule(rate_schedule_id)
   rate_schedule: "rate_schedule_id",
@@ -166,7 +166,7 @@ async function buildErd(
       WHERE tc.table_schema = '${schema}' AND tc.constraint_type = 'PRIMARY KEY'
         AND ${tcFilter}
     `),
-    // Declared FKs (design doc §8 hardening, rolled out table by table). Join
+    // Declared FKs (rolled out table by table). Join
     // key_column_usage twice — once for the child (FK) columns, once for the
     // parent (referenced PK/unique) columns — matching each child column to
     // its parent by position within the key, so composite keys line up.
@@ -193,7 +193,7 @@ async function buildErd(
   ]);
 
   // Single-column PKs only — every curated PK today is one surrogate
-  // <entity>_id column (design doc §7.1). A composite PK is excluded from
+  // <entity>_id column. A composite PK is excluded from
   // the inference map outright rather than guessed at.
   const pkCountByTable = new Map<string, number>();
   for (const r of pkRows) {
@@ -274,7 +274,7 @@ async function buildErd(
     catalog, schema, layer,
     generatedAt: new Date().toISOString(),
     // True while any edge in this response is still convention-inferred
-    // (design doc §8 hardening is rolling out table by table, not all at once).
+    // (rolling out table by table, not all at once).
     edgesAreInferred: edges.some((e) => e.inferred),
     tables: Array.from(tables.values()),
     edges,

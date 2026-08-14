@@ -27,11 +27,12 @@
 
 CREATE OR REFRESH MATERIALIZED VIEW raw_premises (
   CONSTRAINT non_null_premise_id EXPECT (premise_id IS NOT NULL),
+  CONSTRAINT canonical_premise_id EXPECT (premise_id NOT LIKE '{%}' AND premise_id = LOWER(premise_id)),
   CONSTRAINT non_null_county_fips EXPECT (county_fips IS NOT NULL),
   CONSTRAINT realistic_sqft EXPECT (sqft BETWEEN 200 AND 200000),
   CONSTRAINT valid_year_built EXPECT (year_built BETWEEN 1850 AND 2024)
 )
-COMMENT 'Premises — FEMA building footprints inside the utility''s service territory (default: the Detroit tri-county metro core — Wayne, Oakland, Macomb), contiguous-saturation-sampled around a seed point (default: the 8 Mile corridor, spanning urban Detroit + suburban fabric) so the footprint renders as one dense served area rather than scattered dots, enriched with synthesized building characteristics for AMI load-shape stacking. PK: premise_id. FK: county_fips -> raw_counties.GEOID. Source: curated_buildings.buildings (FEMA USA Structures) + synthesized vintage/fuel/envelope/HVAC. Row count configurable via customer_sample_size (default 1,000); footprint via target_geoids + seed_lat/seed_lon.'
+COMMENT 'Premises — FEMA building footprints inside the utility''s service territory (default: the Detroit tri-county metro core — Wayne, Oakland, Macomb), contiguous-saturation-sampled around a seed point (default: the 8 Mile corridor, spanning urban Detroit + suburban fabric) so the footprint renders as one dense served area rather than scattered dots, enriched with synthesized building characteristics for AMI load-shape stacking. PK: premise_id (canonical unbraced lowercase UUID). source_building_id preserves the FEMA source value for lineage. FK: county_fips -> raw_counties.GEOID. Source: curated_buildings.buildings (FEMA USA Structures) + synthesized vintage/fuel/envelope/HVAC. Row count configurable via customer_sample_size (default 1,000); footprint via target_geoids + seed_lat/seed_lon.'
 AS
 
 WITH
@@ -143,13 +144,17 @@ enriched AS (
 )
 
 SELECT
-  building_id                                                      AS premise_id,
+  -- FEMA supplies UUIDs in braced form {xxxxxxxx-xxxx-...}; strip braces and
+  -- lowercase defensively to produce a clean canonical natural key.
+  -- source_building_id preserves the raw value for lineage.
+  building_id                                                      AS source_building_id,
+  LOWER(REGEXP_REPLACE(building_id, '^\\{|\\}$', ''))              AS premise_id,
   occupancy_class,
   primary_occupancy,
 
   -- sqft fallback. FEMA sqft is mostly present but has nulls and a long tail
   -- of obviously-wrong values. Use FEMA when in (300, 50000); otherwise
-  -- synthesize a plausible value from the occupancy class.
+  -- synthesize a plausible value from the occupancy_class.
   CAST(
     CASE
       WHEN sqft IS NULL OR sqft < 300 OR sqft > 50000 THEN

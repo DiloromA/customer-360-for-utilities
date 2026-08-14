@@ -186,6 +186,7 @@ class GeniePlugin extends Plugin {
           issueFlags: b.issueFlags as string | undefined,
           complaintTheme: b.complaint_theme as string | undefined,
           sessionId: b.sessionId as string | undefined,
+          grain: b.grain as string | undefined,
         });
         res.json({ cells, count: cells.length });
       } catch (e) {
@@ -217,6 +218,7 @@ class GeniePlugin extends Plugin {
           usageBands: b.usageBands as string | undefined,
           engagementTiers: b.engagementTiers as string | undefined,
           issueFlags: b.issueFlags as string | undefined,
+          grain: b.grain as string | undefined,
         });
         res.json({ cells, count: cells.length });
       } catch (e) {
@@ -348,7 +350,12 @@ interface AskResult {
 // Columns every customer-point query returns (dots + tooltip + selection
 // panel). Assumes aliases a = dim_account, c = dim_customer, h3 = dim_premise_h3.
 // The dot identity is the human account_number (the deep-link key); customer_id
-// is carried only so "Ask the map" can match Genie's returned customer set.
+// is carried so "Ask the map" can match Genie's returned customer set AND so the
+// client can light every premise of a multi-site customer (their per-site
+// accounts share one customer_id). CAST AS STRING is REQUIRED: customer_id is a
+// 19-digit xxhash64 BIGINT ("LONG"), which runStatement would otherwise
+// Number()-coerce and round — lossy, and distinct ids could collide as doubles.
+// Keeping it a string preserves the id exactly and matches PointRow.customer_id.
 // Per-customer "attention" score — the dot sort + sample ranking. Single source
 // of truth, reused wherever a query needs it (assumes alias c = dim_customer).
 const ATTENTION_SCORE = `CASE WHEN c.payment_stressed_flag THEN 4 ELSE 0 END
@@ -357,7 +364,7 @@ const ATTENTION_SCORE = `CASE WHEN c.payment_stressed_flag THEN 4 ELSE 0 END
          + CASE WHEN c.recent_outage_minutes_90d >= 180 THEN 2 ELSE 0 END
          + CASE WHEN c.critical_care_flag THEN 2 ELSE 0 END`;
 
-const POINT_COLS = `a.account_number, h3.premise_number, c.customer_id, h3.latitude, h3.longitude, c.customer_class, c.usage_band,
+const POINT_COLS = `a.account_number, h3.premise_number, CAST(c.customer_id AS STRING) AS customer_id, h3.latitude, h3.longitude, c.customer_class, c.usage_band,
        c.engagement_tier, c.payment_stressed_flag, c.high_user_flag, c.churn_risk_band,
        c.critical_care_flag, c.liheap_eligible, c.recent_complaint_count_90d,
        c.recent_outage_minutes_90d, c.digital_adoption_score,
@@ -570,7 +577,7 @@ async function fetchMapPoints(args: {
     : "1=1";
   const orderByClause = uniform ? "account_number" : "attention_score DESC, account_number";
   // One dot per occupied premise = the current billing link (bridge is_current)
-  // → its account (identity) and the occupant's profile (signals). `candidates`
+  // → its account (identity) and the customer's profile (signals). `candidates`
   // is every in-viewport match (pre-LIMIT); `counted` attaches the true total
   // to every row via a window function so LIMIT can truncate the OUTPUT while
   // the caller still learns how many rows existed before truncation.
@@ -630,14 +637,14 @@ async function fetchMapCells(args: {
   customerClasses?: string; usageBands?: string; engagementTiers?: string; issueFlags?: string;
   complaintTheme?: string;
   sessionId?: string;
+  grain?: string;
 }): Promise<Record<string, unknown>[]> {
   const { host, token, warehouseId } = args;
   if (!warehouseId) throw new Error("DATABRICKS_WAREHOUSE_ID not set.");
   const raws = cellParamRaws(args);
   raws.complaint_theme = sqlStr((args.complaintTheme ?? "").replace(/[^A-Za-z0-9_]/g, ""));
-  // Scope the choropleth to the session's focus-group cohort (app_focus_set)
-  // when one is active, so cells recolor to cohort-only aggregates.
   raws.session_id = sqlStr(args.sessionId && /^[A-Za-z0-9_-]+$/.test(args.sessionId) ? args.sessionId : "");
+  raws.grain = sqlStr(["premise", "customer", "owner"].includes(args.grain ?? "") ? (args.grain ?? "customer") : "customer");
   return runStatement(host, token, warehouseId, fillParams(loadQuery("exec_map_cells"), raws));
 }
 
@@ -648,12 +655,14 @@ async function fetchMapProgramCells(args: {
   resolution: number;
   south: number; north: number; west: number; east: number;
   customerClasses?: string; usageBands?: string; engagementTiers?: string; issueFlags?: string;
+  grain?: string;
 }): Promise<Record<string, unknown>[]> {
   const { host, token, warehouseId } = args;
   if (!warehouseId) throw new Error("DATABRICKS_WAREHOUSE_ID not set.");
   if (!/^[A-Za-z0-9_-]+$/.test(args.programId)) throw new Error("Invalid program_id.");
   const raws = cellParamRaws(args);
   raws.program_id = sqlStr(args.programId);
+  raws.grain = sqlStr(["premise", "customer", "owner"].includes(args.grain ?? "") ? (args.grain ?? "customer") : "customer");
   return runStatement(host, token, warehouseId, fillParams(loadQuery("exec_map_program_cells"), raws));
 }
 
@@ -708,8 +717,8 @@ interface GroupSampleRow {
 interface GroupAnalytics {
   n: number;        // grp rows — the denominator for issue/segment prevalence
   total: number;    // current service locations — the headline count (premise grain, matches map/KPIs)
-  distinctCustomers: number; // same cohort at customer grain — multi-site customers collapse to one (entity-grain §4.4)
-  // Same cohort at owner grain (entity-grain §4.4/§6.4) — a chain or
+  distinctCustomers: number; // same cohort at customer grain — multi-site customers collapse to one
+  // Same cohort at owner grain — a chain or
   // landlord's premises collapse to one owner.
   distinctOwners: number;
   residential: number;
@@ -747,7 +756,7 @@ async function fetchGroupAnalytics(args: {
   const cc = `${catalog}.${schema}`;
 
   // Build the cohort's FROM…WHERE. Every mode exposes a/c/p (and restricts to the
-  // current occupant per premise via bridge is_current). The cohort is whichever
+  // current customer per premise via bridge is_current). The cohort is whichever
   // way the user defined the focus group, in precedence: an explicit session
   // cohort (focus_set) → an account-number set → a viewport box → else the whole
   // territory (the default focus group when nothing is selected).
@@ -833,7 +842,7 @@ async function fetchGroupAnalytics(args: {
   // (= grp rows) is the denominator issue/segment prevalence is computed against
   // on the client (identical to total here). `distinct_customers` is the same
   // cohort at customer grain, exposed alongside so the client can label both
-  // units explicitly (entity-grain §4.4) instead of picking one silently.
+  // units explicitly instead of picking one silently.
   const aggSql = `
     WITH base AS (
       SELECT c.customer_id, c.customer_class, c.payment_stressed_flag, c.churn_risk_band,

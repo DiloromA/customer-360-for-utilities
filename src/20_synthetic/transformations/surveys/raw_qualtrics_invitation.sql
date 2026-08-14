@@ -1,6 +1,5 @@
 -- Qualtrics Invitation — the invited-but-not-necessarily-responding NPS
--- population (response-rate denominator, csat-experience-view-design.md
--- §4.2).
+-- population (response-rate denominator)..
 --
 -- raw_qualtrics_response.sql already computes an "invited" draw (r_sample)
 -- and a "responded" draw (r_respond) for every (survey, customer) pair, but
@@ -18,9 +17,9 @@
 -- raw_qualtrics_response is drawn directly from Genesys interactions as the
 -- response itself, with no "offered a survey, declined" step. So this table
 -- covers NPS only; CSAT survey health stays volume-only (labeled honestly
--- in the app), per the design doc's own recommendation.
+-- in the app).
 --
--- ~25% of (survey × current-occupant customer) pairs are invited per
+-- ~25% of (survey × current-customer customer) pairs are invited per
 -- quarterly NPS survey -> comparable row count to nps_candidates in
 -- raw_qualtrics_response.sql (~200K invited rows across 8 quarters).
 
@@ -41,6 +40,6 @@ SELECT
 FROM raw_qualtrics_survey s
 CROSS JOIN ${customer_master_schema}.raw_customer c
 WHERE s.survey_type = 'nps_relationship'
-  AND NOT c.is_prior_occupant                                          -- current occupants only, matches nps_candidates
+  AND NOT c.is_prior_customer                                          -- current customers only, matches nps_candidates
   AND (abs(xxhash64(s.survey_id, c.customer_id, 'sample', ${random_seed}))
     / CAST(9223372036854775807 AS DOUBLE)) < 0.25;                     -- the invited/sampled 25%

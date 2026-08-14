@@ -80,8 +80,7 @@ things are worth understanding before you dig into the pipeline:
   rate structures, retrain the ML on real meters, reskin the app. See
   [Make it yours](#make-it-yours) below for the concrete steps to do exactly
   that. This repo is a vetted starting point, not a finished product —
-  it will keep evolving; see
-  [Status / known follow-ups](#status--known-follow-ups).
+  it will keep evolving; see the [Roadmap](#roadmap).
 
 ## Quickstart
 
@@ -179,17 +178,33 @@ it actually looks like:
    `states_filter` / `state_fips` / `target_geoids` / `target_state` —
    these are the cheap knobs, not the hard work.
 
-## Data sources & attributions
+## Public data sources & their licenses
 
-- **FEMA / ORNL USA Structures** — building footprints (CC BY 4.0).
-- **NREL End-Use Load Profiles (EULP), AMY2018 weather** — hourly temperature +
-  solar irradiance, per county (OEDI public S3, keyless).
-- **NREL ResStock / ComStock** — building load profiles + PV generation shape (OEDI public S3; optional).
-- **US Census TIGER/Line** — county boundaries (public domain).
+The real, grounded inputs to the data model (see [Intent](#intent-what-this-repo-is-and-isnt))
+come from a handful of public datasets. Everything else — customer usage,
+account history, complaints — is synthesized on top of them and is not derived
+from any licensed third-party data. Each real source, its provenance, and its
+license:
 
-## Status / known follow-ups
+| Dataset | Used for | Provenance | License |
+| --- | --- | --- | --- |
+| **FEMA / ORNL USA Structures** | Building footprints, occupancy class, centroids | `s3://fema-femadata/Partners/ORNL/USA_Structures/` (public S3) | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) |
+| **NREL End-Use Load Profiles (EULP) — AMY2018 weather** | Hourly dry-bulb temperature, solar irradiance, humidity, wind per county | OEDI public S3 (`oedi-data-lake`); [data.openei.org/submissions/4520](https://data.openei.org/submissions/4520) | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) |
+| **NREL End-Use Load Profiles — ResStock / ComStock** | Reference residential/commercial load shapes + PV generation shape (optional) | OEDI public S3 (`oedi-data-lake/nrel-pds-building-stock/end-use-load-profiles-for-us-building-stock`) | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) |
+| **US Census TIGER/Line** | County boundary geometry (NAD83 / EPSG:4269) | [www2.census.gov/geo/tiger/](https://www2.census.gov/geo/tiger/) | Public domain (U.S. Government work) |
 
-- **Before a true public release:** confirm `@databricks/appkit` is installable
-  from the public npm registry and regenerate `app/package-lock.json` against it
-  (the internal `.npmrc` + lockfile are gitignored); the boundary-spine redesign
-  (ARCHITECTURE.md §10 Roadmap) is planned.
+**Attribution.** The NREL End-Use Load Profiles data (weather, ResStock, and
+ComStock) is cited as: Wilson, Eric, et al. *End-Use Load Profiles for the U.S.
+Building Stock.* National Renewable Energy Laboratory (NREL), 14 October 2021,
+Open Energy Data Initiative (OEDI). DOI:
+[10.25984/1876417](https://doi.org/10.25984/1876417). CC BY 4.0 and CC BY 4.0
+data reuse requires retaining these attributions in any redistribution.
+
+Open-source library dependencies bundled or used by this repo (the app and the
+Python pipeline) are attributed by license in [`NOTICE`](./NOTICE); this
+repo's own license is [`LICENSE`](./LICENSE).
+
+## Roadmap
+
+- The boundary-spine redesign is planned — see the Roadmap in
+  [`ARCHITECTURE.md`](./ARCHITECTURE.md).

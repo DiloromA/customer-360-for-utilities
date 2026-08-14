@@ -107,7 +107,7 @@ from_baseline AS (
       / CAST(9223372036854775807 AS DOUBLE)                           AS r_reach
   FROM ${customer_master_schema}.raw_customer c
   CROSS JOIN (SELECT 2017 AS year UNION ALL SELECT 2018) y
-  WHERE NOT c.is_prior_occupant                                          -- current occupants only (no prior-occupant baseline posts in the 2017-2018 window)
+  WHERE NOT c.is_prior_customer                                          -- current customers only (no prior-customer baseline posts in the 2017-2018 window)
     AND abs(xxhash64(c.customer_id, y.year, 'baseline_pick', ${random_seed})) % 1000 < 1
 ),
 

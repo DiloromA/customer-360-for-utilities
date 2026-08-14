@@ -112,10 +112,8 @@ governance scaffolding: Genie prefers them for aggregate/KPI questions (`app/set
 and the CSAT, marketing-program, and DSM-enrollment app queries
 (`app/config/queries/csat_*.sql`, `mkt_program_kpis.sql`,
 `mkt_enrollment_monthly.sql`) read `metric_csat`/`metric_nps`/`metric_fcr`/
-`metric_customer_base`/`metric_dsm_uptake` directly — see
-`docs/metric-views-foundation-design.md` §8 for which app queries read metric
-views (the map/drawer/search/cohort surfaces deliberately stay on the star
-schema). The demo's "now" is a deploy-time var,
+`metric_customer_base`/`metric_dsm_uptake` directly (the map/drawer/search/cohort
+surfaces deliberately stay on the star schema). The demo's "now" is a deploy-time var,
 `as_of_date` (defaults to `2018-12-31`); all as-of / effective-dating anchors to
 that date.
 
@@ -228,20 +226,24 @@ they're covered here in full.
 | Add/remove a curated table | drop or delete a `.sql` file in `transformations/` (§4) |
 | Add a governed metric | one entry in the `METRIC_VIEWS` dict, `30_curated/metric_views.py` (§5) |
 | Add an ML model | new `40_ml/<model>/` folder, one line in `pipelines.yml`, copy the four tasks in `jobs.yml` (§8) |
-| Add/remove a left-nav "Business Function" | one entry in `NAV_ITEMS`, `app/client/src/nav/navConfig.ts` (below) |
+| Add/remove a left-nav view | one entry in `NAV_ITEMS`, `app/client/src/nav/navConfig.ts` (below) |
 | Add/remove an executive-map layer | one entry in `LAYERS`, `app/client/src/mapConstants.ts` (below) |
 
 ### Business Functions (left nav)
 
 The left nav (`app/client/src/nav/navConfig.ts`) is a single declarative
 `NAV_ITEMS` array — `NavRail` and `App.tsx` just iterate it; nothing is
-hardcoded per-item. Each entry has a `group` (`top` for overview items like the
-map; `business` for the **Business Functions** utilities actually organize
-around — Customer Service, Outages & Reliability, Revenue & Collections, EE &
-DER Programs; `reference` for docs/data-model/metrics pages) and a `status`
-(`"ready"` for a live view, `"placeholder"` for a blurb card describing what
-would go there). Standing up a new business function is one object in this
+hardcoded per-item. Each entry has a `group`: `top` (rail label **Insights** —
+the live analytical surfaces: Explorer, CSAT) or `reference`
+(docs/data-model/metrics pages). Standing up a new view is one object in this
 array plus its view; retiring one is deleting the entry.
+
+The four **Business Functions** a utility actually organizes around — Customer
+Service, Outages & Reliability, Revenue & Collections, EE & DER Programs — were
+carried for a while as placeholder nav cards, then retired to keep the rail to
+what's genuinely live. Their "what this could grow into" story now lives in the
+in-app **Documentation** (application-architecture topic) rather than as dead
+nav items.
 
 ### Executive map layers
 

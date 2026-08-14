@@ -1,10 +1,10 @@
 -- Per-customer hourly load profile for a chosen month and day type.
 -- fact_customer_hourly_load_profile is physical (service_point) grain, not
--- account grain (temporal-realism §5.2 — an occupant can change mid-window,
+-- account grain (a customer can change mid-window,
 -- so the fact itself carries no account_id). Resolve the account's
 -- service_point(s) as-of the requested period's end via dim_service_agreement,
 -- then join the fact by service_point_id. A large sub-metered commercial
--- account (temporal-realism §5.3) has 2-5 CONCURRENT service_points, so sum
+-- account has 2-5 CONCURRENT service_points, so sum
 -- across them per hour — otherwise this would only show one meter's slice of
 -- the site's load. Returns 24 rows (hour 0-23).
 
@@ -20,9 +20,9 @@ WITH acct AS (
 sp AS (
   -- As-of the requested period's end: which service_point(s) this account was
   -- tied to. Ordinarily an account has exactly one tenancy ever; a relocated
-  -- account (temporal-realism §5.1) has two over time (this picks whichever
+  -- account has two over time (this picks whichever
   -- was active at period-end); a sub-metered commercial account
-  -- (temporal-realism §5.3) has 2-5 active at once (this picks all of them).
+  -- has 2-5 active at once (this picks all of them).
   SELECT DISTINCT sa.service_point_id
   FROM acct
   JOIN {{catalog}}.{{schema}}.dim_service_agreement sa ON sa.account_id = acct.account_id

@@ -89,18 +89,21 @@ encoded.columns = [_safe_feature_name(c) for c in encoded.columns]
 FEATURE_COLUMNS = [c for c in encoded.columns if c != "has_ev_label"]
 print(f"Feature columns after encoding: {len(FEATURE_COLUMNS)}")
 
-# Persist the exact training snapshot for SQL exploration.
-training_snapshot = features_df.copy()
+# Persist the exact training snapshot for SQL exploration. Written
+# Spark-natively straight from the source feature table: a
+# createDataFrame(pandas) round-trip serializes the whole frame into one
+# broadcast RPC and blows spark.rpc.message.maxSize (256MB) at full scale.
+snapshot_table = f"{catalog}.{schema}.ml_ev_training_data"
 (
-    spark.createDataFrame(training_snapshot)
+    spark.table(f"{catalog}.{schema}.ml_ev_detection_features")
     .write.mode("overwrite")
     # overwriteSchema: the curated re-key changed customer_id STRING -> BIGINT,
     # so a plain overwrite hits DELTA_FAILED_TO_MERGE_FIELDS against the stale
     # table schema. Replace the schema on overwrite.
     .option("overwriteSchema", "true")
-    .saveAsTable(f"{catalog}.{schema}.ml_ev_training_data")
+    .saveAsTable(snapshot_table)
 )
-print(f"Wrote ml_ev_training_data ({len(training_snapshot)} rows)")
+print(f"Wrote {snapshot_table} ({spark.table(snapshot_table).count()} rows)")
 
 # COMMAND ----------
 

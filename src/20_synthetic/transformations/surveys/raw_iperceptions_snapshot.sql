@@ -38,8 +38,8 @@ candidates AS (
     abs(xxhash64(c.customer_id, 'iperc_task', ${random_seed}))
       / CAST(9223372036854775807 AS DOUBLE)                          AS r_task
   FROM ${customer_master_schema}.raw_customer c
-  -- Historical era (2015-2016): prior occupants were active customers then,
-  -- so they are intentionally INCLUDED here (no is_prior_occupant filter).
+  -- Historical era (2015-2016): prior customers were active customers then,
+  -- so they are intentionally INCLUDED here (no is_prior_customer filter).
   -- ~6% of customers visited the utility website and were intercepted by iPerceptions.
   WHERE abs(xxhash64(c.customer_id, 'iperc_visit', ${random_seed})) % 100 < 6
 )

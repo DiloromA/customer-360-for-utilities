@@ -19,7 +19,7 @@ enrolled AS (
 ),
 
 -- One row per premise for address display. A large sub-metered commercial
--- premise (temporal-realism §5.3) has 2-5 dim_service_point rows sharing the
+-- premise has 2-5 dim_service_point rows sharing the
 -- same address, so a naive join would duplicate that account's row in the
 -- target list — any one sibling is a fine representative since the address
 -- fields are identical across siblings.

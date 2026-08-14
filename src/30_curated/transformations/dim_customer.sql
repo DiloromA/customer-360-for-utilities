@@ -1,6 +1,6 @@
 -- Customer dimension — the PERSON/ORG (CIM Customer), profile-only. The most
--- important table in the curated layer. ~58K rows (incl. prior-occupant
--- customers, who carry profile but no fact activity in the 2017-2018 window).
+-- important table in the curated layer. ~58K rows (incl. prior customers
+-- from closed tenancies, who carry profile but no fact activity in the 2017-2018 window).
 --
 -- The customer is decoupled from premise/account. This dim does not carry
 -- account_id or premise_id — join through dim_account (customer_id FK)
@@ -22,8 +22,10 @@ CREATE OR REFRESH MATERIALIZED VIEW dim_customer (
   customer_id                BIGINT  NOT NULL PRIMARY KEY RELY,
   customer_number            STRING  NOT NULL,
   customer_type              STRING,
+  customer_name              STRING,   -- NULL for individuals; fictional org label for commercial_parent
   n_premises_owned           BIGINT,
-  is_prior_occupant          BOOLEAN,
+  n_premises_portfolio       BIGINT,   -- for commercial_parent: total premises across all subsidiaries; else same as n_premises_owned
+  is_prior_customer          BOOLEAN,
   customer_class             STRING,
   income_band                STRING,
   household_size             INT,
@@ -49,18 +51,36 @@ CREATE OR REFRESH MATERIALIZED VIEW dim_customer (
   peer_sqft_band             STRING,
   _ingested_at               TIMESTAMP
 )
-COMMENT 'Customer dimension — the person/org party, profile-only and decoupled from premise/account (join via dim_account.customer_id). customer_id is the durable BIGINT key; customer_number is the natural key. The latent archetype from raw is INTENTIONALLY NOT exposed; personas see disclosed signals (payment_stressed_flag, high_user_flag, engagement_tier, etc.) computed from observable behaviour. Current-state snapshot; profile-change history is in dim_customer_history (SCD Type 2).'
+COMMENT 'Customer dimension — the person/org party, profile-only and decoupled from premise/account (join via dim_account.customer_id). customer_id is the durable BIGINT key; customer_number is the natural key. customer_name holds a fictional org label for commercial_parent rows (NULL for all others — PII-free policy). n_premises_portfolio is the portfolio-wide count for parent organisations (total across all subsidiaries); equals n_premises_owned for non-parent types. The latent archetype from raw is INTENTIONALLY NOT exposed; personas see disclosed signals (payment_stressed_flag, high_user_flag, engagement_tier, etc.) computed from observable behaviour. Current-state snapshot; profile-change history is in dim_customer_history (SCD Type 2).'
 AS
 
 WITH
 
 raw_customer AS (
   SELECT
-    customer_id, customer_type, n_premises_owned, is_prior_occupant,
+    customer_id, customer_type, customer_name, n_premises_owned, is_prior_customer,
     customer_class, income_band, household_size, age_band_hoh,
     language_preference, tenure, critical_care_flag, liheap_eligible,
     customer_since_date
   FROM ${customer_master_schema}.raw_customer
+),
+
+-- Portfolio premise count for commercial_parent rows: sum of n_premises_owned
+-- across all subsidiary customers linked to this parent via the same chain_key.
+-- All other customer types get n_premises_owned unchanged.
+parent_portfolio AS (
+  SELECT
+    p.customer_id                              AS parent_customer_id,
+    COALESCE(SUM(s.n_premises_owned), 0)       AS n_premises_portfolio
+  FROM ${customer_master_schema}.raw_customer p
+  JOIN ${customer_master_schema}.raw_premise_customer_map pcm_p
+    ON md5(CONCAT(pcm_p.chain_key, '_parent_customer')) = p.customer_id
+   AND pcm_p.is_hero_chain
+  JOIN ${customer_master_schema}.raw_customer s
+    ON s.customer_id = pcm_p.current_customer_id
+   AND s.customer_type = 'commercial_subsidiary'
+  WHERE p.customer_type = 'commercial_parent'
+  GROUP BY p.customer_id
 ),
 
 -- Anchor premise per customer (their min premise-bearing account) — supplies
@@ -75,7 +95,7 @@ cust_premise AS (
 -- Payment-stressed signal from trailing 12 months of bills. Late/unpaid
 -- counts and max_previous_balance stay at the raw bill-event grain (each
 -- meter's own bill is its own late/unpaid event, including for a sub-metered
--- commercial account's concurrent usage_points, temporal-realism §5.3).
+-- commercial account's concurrent service points, temporal-realism).
 billing_signals AS (
   SELECT
     customer_id,
@@ -88,8 +108,8 @@ billing_signals AS (
 ),
 
 -- avg_monthly_kwh_12mo (feeds high_user_flag, which powers the exec map &
--- Genie) needs sibling usage_points summed to a (customer, month) total
--- FIRST — a sub-metered commercial account bills one row PER usage_point
+-- Genie) needs sibling service points summed to a (customer, month) total
+-- FIRST — a sub-metered commercial account bills one row PER service point
 -- per month, so AVG over the raw rows would average per-METER kwh instead.
 billing_kwh AS (
   SELECT customer_id, AVG(month_total_kwh) AS avg_monthly_kwh_12mo
@@ -225,7 +245,9 @@ account_info AS (
     MAX(autopay_enrolled)   AS autopay_enrolled,
     MAX(paperless_enrolled) AS paperless_enrolled
   FROM ${customer_master_schema}.raw_customer_account
-  WHERE account_group IN ('standard','corporate_parent')
+  -- commercial_subsidiary customers hold consolidated_billing accounts; include
+  -- that group so their autopay/paperless signals are not NULL.
+  WHERE account_group IN ('standard','corporate_parent','consolidated_billing')
   GROUP BY customer_id
 )
 
@@ -233,8 +255,12 @@ SELECT
   abs(xxhash64(rc.customer_id))                                            AS customer_id,
   rc.customer_id                                                      AS customer_number,
   rc.customer_type,
+  rc.customer_name,
   rc.n_premises_owned,
-  rc.is_prior_occupant,
+  -- n_premises_portfolio: for commercial_parent, the sum of all subsidiaries'
+  -- premise counts; for all other types, same as n_premises_owned.
+  COALESCE(pp.n_premises_portfolio, rc.n_premises_owned)               AS n_premises_portfolio,
+  rc.is_prior_customer,
   rc.customer_class,
   rc.income_band,
   rc.household_size,
@@ -287,6 +313,7 @@ SELECT
   current_timestamp()                                                AS _ingested_at
 
 FROM raw_customer rc
+LEFT JOIN parent_portfolio   pp ON pp.parent_customer_id = rc.customer_id
 LEFT JOIN account_info       ai USING (customer_id)
 LEFT JOIN billing_signals    bs USING (customer_id)
 LEFT JOIN billing_kwh        bk USING (customer_id)

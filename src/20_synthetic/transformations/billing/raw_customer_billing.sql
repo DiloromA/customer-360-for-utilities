@@ -1,8 +1,8 @@
--- Customer Billing — one row per (account, service_agreement, usage_point,
+-- Customer Billing — one row per (account, service_agreement, service point,
 -- monthly period). ~50K accounts x 24 months (2017+2018) ≈ 1.2M rows (a rate
 -- switcher contributes two service_agreement_ids across the switch, still one
--- bill per month; a large sub-metered commercial account, temporal-realism
--- §5.3, contributes one bill PER usage_point every month, permanently).
+-- bill per month; a large sub-metered commercial account contributes one bill
+-- PER service point every month, permanently — temporal-realism).
 --
 -- Pipeline:
 --   1. agr / reading_attr / usage_by_up / monthly_usage
@@ -10,10 +10,10 @@
 --                        service_agreement in force on its own date, THEN
 --                        aggregate to (account, service_agreement, month) —
 --                        not the reverse. This is what correctly splits a
---                        mid-month occupant transition's kWh across two
---                        agreements/accounts (temporal-realism §5.2) instead
+--                        mid-month customer transition's kWh across two
+--                        agreements/accounts instead
 --                        of assigning the whole month to whichever agreement
---                        wins a month-level pick. AMI is usage_point-keyed;
+--                        wins a month-level pick. AMI is service point-keyed;
 --                        account/rate are resolved here, not on AMI.
 --   2. line_items        Apply rate-schedule-specific pricing
 --                        -> service / energy / demand / pscr /
@@ -30,14 +30,14 @@
 --   4. monthly_carry / monthly_running
 --                        Collapse to (account, premise, month) before
 --                        windowing the arrears ledger — a sub-metered
---                        premise's concurrent usage_points must share ONE
+--                        premise's concurrent service points must share ONE
 --                        ledger, not contaminate each other's "previous"
 --                        balance every month. A relocation's transition
 --                        month still keeps its two (different-premise) rows
 --                        separate, preserving the deliberate departing ->
 --                        arriving carry-forward chaining.
 --   5. (final SELECT)    Joins the shared previous_balance back, attributed
---                        only to the carrier row (MIN usage_point_id that
+--                        only to the carrier row (MIN service_point_id that
 --                        month) so summing a premise's sibling bills for the
 --                        month never double-counts it. total_amount_due =
 --                        current_charges + (previous_balance on the carrier
@@ -63,19 +63,19 @@ CREATE OR REFRESH MATERIALIZED VIEW raw_customer_billing (
   CONSTRAINT non_null_period               EXPECT (bill_period_end IS NOT NULL),
   CONSTRAINT non_negative_total_kwh        EXPECT (total_kwh >= 0)
 )
-COMMENT 'Customer Billing — CIM CustomerBilling, one row per (account, service_agreement, monthly period). AMI is keyed by usage_point; each month is aggregated from hourly AMI and attributed to the billing account via the as-of service_agreement in force that month (so a rate switcher is billed res_d1 before the switch and the new rate after). Applies representative 2018 investor-owned-utility rate schedules with TOU split + peak demand, and carries forward the unpaid portion of prior bills (partial-pay residue + fully unpaid). PK: bill_id. FK: account_id -> raw_customer_account; service_agreement_id -> raw_service_agreement; usage_point_id -> raw_usage_point.'
+COMMENT 'Customer Billing — CIM CustomerBilling, one row per (account, service_agreement, monthly period). AMI is keyed by service point; each month is aggregated from hourly AMI and attributed to the billing account via the as-of service_agreement in force that month (so a rate switcher is billed res_d1 before the switch and the new rate after). Applies representative 2018 investor-owned-utility rate schedules with TOU split + peak demand, and carries forward the unpaid portion of prior bills (partial-pay residue + fully unpaid). PK: bill_id. FK: account_id -> raw_customer_account; service_agreement_id -> raw_service_agreement; service_point_id -> raw_service_point.'
 AS
 
 WITH
 
--- In-window agreements per usage_point. Prior-occupant agreements that
+-- In-window agreements per service point. Prior-customer agreements that
 -- terminated before the display window are excluded so a reading never
 -- resolves to a moved-out account. Window start derives from as_of_date/
 -- history_months so this holds for any as_of_date, matching the convention
 -- every other 20_synthetic generator uses.
 agr AS (
   SELECT
-    usage_point_id,
+    service_point_id,
     account_id,
     premise_id,
     service_agreement_id,
@@ -88,14 +88,14 @@ agr AS (
 ),
 
 -- Attribute each HOURLY reading to the as-of agreement in force on its own
--- date (temporal-realism §5.2) — this is what correctly splits a mid-month
--- occupant transition's kWh across two agreements/accounts instead of a
+-- date — this is what correctly splits a mid-month
+-- customer transition's kWh across two agreements/accounts instead of a
 -- month-level "whichever agreement wins" pick. Agreement windows shouldn't
 -- overlap by construction (each tenancy's effective_date is the prior one's
 -- termination_date), so the ROW_NUMBER below is a defensive dedup only.
 reading_attr AS (
   SELECT
-    ami.usage_point_id,
+    ami.service_point_id,
     ami.timestamp_utc,
     ami.kwh_delivered,
     ami.kwh_received,
@@ -105,26 +105,26 @@ reading_attr AS (
     a.rate_schedule,
     a.effective_date,
     ROW_NUMBER() OVER (
-      PARTITION BY ami.usage_point_id, ami.timestamp_utc
+      PARTITION BY ami.service_point_id, ami.timestamp_utc
       ORDER BY a.effective_date DESC, a.service_agreement_id
     ) AS rn
   FROM ${ami_table} ami
   JOIN agr a
-    ON a.usage_point_id = ami.usage_point_id
+    ON a.service_point_id = ami.service_point_id
    AND a.effective_date <= CAST(ami.timestamp_utc AS DATE)
    AND (a.termination_date IS NULL OR CAST(ami.timestamp_utc AS DATE) < a.termination_date)
 ),
 
 -- Aggregate the now-correctly-attributed readings to (account,
 -- service_agreement, month). A transition month naturally produces two rows
--- (one per account/usage_point) instead of one; an ordinary month produces
+-- (one per account/service point) instead of one; an ordinary month produces
 -- exactly one.
 usage_by_up AS (
   SELECT
     account_id,
     premise_id,
     service_agreement_id,
-    usage_point_id,
+    service_point_id,
     rate_schedule,
     MIN(effective_date)                                                AS agr_effective_date,
     YEAR(timestamp_utc)                                                 AS bill_year,
@@ -148,7 +148,7 @@ usage_by_up AS (
     MAX(kwh_delivered)                                                  AS peak_demand_kw
   FROM reading_attr
   WHERE rn = 1
-  GROUP BY account_id, premise_id, service_agreement_id, usage_point_id, rate_schedule,
+  GROUP BY account_id, premise_id, service_agreement_id, service_point_id, rate_schedule,
            YEAR(timestamp_utc), MONTH(timestamp_utc)
 ),
 monthly_usage AS (
@@ -189,12 +189,12 @@ line_items AS (
         WHEN rate_schedule LIKE 'res_%' THEN 0.156
         ELSE                                 0.092
       END                                                            AS net_metering_credit,
-    -- usage_point_id-qualified: a transition month's two rows share
-    -- account_id/bill_year/bill_month but have different usage_point_id
-    -- (temporal-realism §5.2) — without this, both rows would collide on the
+    -- service_point_id-qualified: a transition month's two rows share
+    -- account_id/bill_year/bill_month but have different service_point_id
+    -- — without this, both rows would collide on the
     -- same bill_id. A no-op for every non-split account (still exactly one
-    -- usage_point per account per month).
-    md5(CONCAT(account_id, '_', usage_point_id, '_', CAST(bill_year AS STRING), '_', LPAD(CAST(bill_month AS STRING), 2, '0'))) AS bill_id,
+    -- service point per account per month).
+    md5(CONCAT(account_id, '_', service_point_id, '_', CAST(bill_year AS STRING), '_', LPAD(CAST(bill_month AS STRING), 2, '0'))) AS bill_id,
     DATE_ADD(LAST_DAY(MAKE_DATE(bill_year, bill_month, 1)), 1)       AS bill_date,
     DATE_ADD(LAST_DAY(MAKE_DATE(bill_year, bill_month, 1)), 15)      AS due_date
   FROM monthly_usage
@@ -262,8 +262,8 @@ classified AS (
 ),
 
 -- Collapse to (account, premise, calendar month) before running the arrears
--- ledger. A large commercial premise's 2-5 concurrent usage_points
--- (temporal-realism §5.3) bill under the SAME account every month, not just
+-- ledger. A large commercial premise's 2-5 concurrent service points
+-- bill under the SAME account every month, not just
 -- during a transition — without this collapse, the ROW-based "1 PRECEDING"
 -- window below would misread a sibling meter's SAME-month charge as this
 -- meter's prior-month balance. A relocation's transition month still
@@ -276,7 +276,7 @@ monthly_carry AS (
     premise_id,
     bill_period_end,
     MIN(agr_effective_date)   AS agr_effective_date,
-    MIN(usage_point_id)       AS carrier_usage_point_id,
+    MIN(service_point_id)       AS carrier_service_point_id,
     SUM(row_unpaid_carry)     AS month_unpaid_carry
   FROM classified
   GROUP BY account_id, premise_id, bill_period_end
@@ -287,7 +287,7 @@ monthly_running AS (
     account_id,
     premise_id,
     bill_period_end,
-    carrier_usage_point_id,
+    carrier_service_point_id,
     COALESCE(SUM(month_unpaid_carry) OVER (
       PARTITION BY account_id
       -- agr_effective_date tiebreaks a transition month's two same-account,
@@ -303,7 +303,7 @@ SELECT
   c.bill_id,
   c.account_id,
   c.service_agreement_id,
-  c.usage_point_id,
+  c.service_point_id,
   c.customer_id,
   c.rate_schedule,
   c.bill_period_start,
@@ -330,15 +330,15 @@ SELECT
   ROUND(c.row_unpaid_carry, 2)                                       AS unpaid_carry,
 
   -- Previous balance is shared per (account, premise, month) — attributed
-  -- only to the carrier row (MIN usage_point_id that month) so summing
+  -- only to the carrier row (MIN service_point_id that month) so summing
   -- across a sub-metered premise's sibling bills never double-counts it.
   ROUND(
-    CASE WHEN c.usage_point_id = mr.carrier_usage_point_id THEN mr.previous_balance ELSE 0.0 END,
+    CASE WHEN c.service_point_id = mr.carrier_service_point_id THEN mr.previous_balance ELSE 0.0 END,
   2)                                                                 AS previous_balance,
 
   ROUND(
     c.current_charges +
-    CASE WHEN c.usage_point_id = mr.carrier_usage_point_id THEN mr.previous_balance ELSE 0.0 END,
+    CASE WHEN c.service_point_id = mr.carrier_service_point_id THEN mr.previous_balance ELSE 0.0 END,
   2)                                                                 AS total_amount_due,
 
   current_timestamp()                                                AS _ingested_at

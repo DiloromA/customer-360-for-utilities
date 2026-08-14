@@ -21,7 +21,7 @@ CREATE OR REFRESH MATERIALIZED VIEW raw_portal_session (
   CONSTRAINT valid_platform       EXPECT (platform IN ('web','ios','android')),
   CONSTRAINT positive_duration    EXPECT (duration_seconds > 0)
 )
-COMMENT 'Portal Session — one row per utility web/app login. ~1.5M rows over 2017+2018. Archetype-biased session frequency. Current occupants only (prior-occupant customers excluded); joined to the customer''s single primary account. PK: session_id. FK: customer_id -> raw_customer.'
+COMMENT 'Portal Session — one row per utility web/app login. ~1.5M rows over 2017+2018. Archetype-biased session frequency. Current customers only (prior-customer customers excluded); joined to the customer''s single primary account. PK: session_id. FK: customer_id -> raw_customer.'
 AS
 
 WITH
@@ -69,7 +69,7 @@ customer_months AS (
   LEFT JOIN ee_participants ee ON ee.customer_id = c.customer_id
   CROSS JOIN years y
   CROSS JOIN months m
-  WHERE NOT c.is_prior_occupant                              -- current occupants only
+  WHERE NOT c.is_prior_customer                              -- current customers only
 ),
 
 with_count AS (

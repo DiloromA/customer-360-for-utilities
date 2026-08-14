@@ -1,5 +1,5 @@
 -- Customer profile header. All the at-a-glance fields needed at session start:
--- account info, rate, key flags, recent exposure — plus occupant history.
+-- account info, rate, key flags, recent exposure — plus customer history.
 --
 -- The app searches and deep-links by the human account_number string; this
 -- query resolves it once to the BIGINT account_id / customer_id / premise_id,
@@ -7,18 +7,42 @@
 --   account → customer (profile + behavioural signals)
 --           → premise (building) → service_point (address).
 -- "Customer since" = the current tenancy start from the effective-dated
--- bridge_account_premise; if a prior occupant held this premise before the
+-- bridge_account_premise; if a prior customer held this premise before the
 -- current one, we surface when their tenancy ended (tenant turnover).
 
 -- @param account_number STRING
 
 WITH acct AS (
-  SELECT account_id, customer_id, premise_id
-  FROM {{catalog}}.{{schema}}.dim_account
-  WHERE account_number = :account_number
+  SELECT a.account_id, a.customer_id, acp.premise_id
+  FROM {{catalog}}.{{schema}}.dim_account a
+  LEFT JOIN {{catalog}}.{{schema}}.account_current_premise acp
+    ON acp.account_id = a.account_id
+  WHERE a.account_number = :account_number
+),
+-- Linkage counts for the "1 customer · N premises · M accounts" context strip:
+-- how many CURRENT premises and billing accounts this party holds, so the rail
+-- can state what sits below the customer grain. A single-site residential
+-- customer reads 1·1; a second-home or chain customer reads the divergence.
+linkage AS (
+  SELECT
+    COUNT(DISTINCT b.premise_id) AS current_premises,
+    COUNT(DISTINCT b.account_id) AS current_accounts
+  FROM {{catalog}}.{{schema}}.bridge_account_premise b
+  JOIN acct ON acct.customer_id = b.customer_id
+  WHERE b.is_current
+),
+-- Commercial-hierarchy membership: is this customer a subsidiary rolling up to
+-- a named parent org? Drives the "part of <parent>" affordance and the (later)
+-- hierarchy view entry point. NULL parent for the residential/standalone norm.
+hierarchy AS (
+  SELECT p.customer_name AS parent_org_name
+  FROM {{catalog}}.{{schema}}.bridge_customer_hierarchy h
+  JOIN acct ON acct.customer_id = h.child_customer_id AND h.is_current
+  JOIN {{catalog}}.{{schema}}.dim_customer p ON p.customer_id = h.parent_customer_id
+  LIMIT 1
 ),
 -- One row per premise for address display. A large sub-metered commercial
--- premise (temporal-realism §5.3) has 2-5 dim_service_point rows sharing the
+-- premise has 2-5 dim_service_point rows sharing the
 -- same address, so a naive join would duplicate this single-row header —
 -- any one of them is a fine representative since the address fields are
 -- identical across siblings.
@@ -35,10 +59,10 @@ cur_link AS (
   WHERE b.is_current
 ),
 prior_occ AS (
-  -- Previous occupant(s) of this premise (closed links = tenant turnover).
+  -- Previous customer(s) of this premise (closed links = tenant turnover).
   SELECT b.premise_id,
-         MAX(b.link_end_date) AS previous_occupant_until,
-         COUNT(*)             AS previous_occupant_count
+         MAX(b.link_end_date) AS previous_customer_until,
+         COUNT(*)             AS previous_customer_count
   FROM {{catalog}}.{{schema}}.bridge_account_premise b
   JOIN acct ON acct.premise_id = b.premise_id
   WHERE NOT b.is_current
@@ -48,8 +72,8 @@ prior_occ AS (
 -- is scoped to the account the CSR pulled up, so usage must be measured at that
 -- site — NOT rolled up across a multi-site customer's whole portfolio (which is
 -- what dim_customer.avg_monthly_kwh_12mo does). Window matches dim_customer.
--- A sub-metered commercial account (temporal-realism §5.3) bills one row PER
--- usage_point per month, so sum to (account, month) first — AVG over the raw
+-- A sub-metered commercial account bills one row PER
+-- service point per month, so sum to (account, month) first — AVG over the raw
 -- bill rows would average per-METER kwh, not the site's true monthly total.
 site_usage AS (
   SELECT AVG(monthly.total_kwh) AS avg_monthly_kwh_12mo
@@ -83,6 +107,14 @@ SELECT
   p.premise_number,
   c.customer_number,
   c.customer_class,
+  -- Customer identity for the profile title. customer_name is populated for
+  -- commercial parties (org / chain) and NULL for residential (no person name
+  -- in this dataset) — so the header leads with the org name when present and
+  -- falls back to the in-focus site address, explicitly framed as one of N
+  -- locations, for residential. customer_type distinguishes the commercial
+  -- sub-kinds behind that name.
+  c.customer_name,
+  c.customer_type,
   c.language_preference,
   c.critical_care_flag,
   c.liheap_eligible,
@@ -105,8 +137,8 @@ SELECT
   p.sqft_band                                                       AS peer_sqft_band,
   c.customer_since_date,
   cl.tenant_since,
-  po.previous_occupant_until,
-  COALESCE(po.previous_occupant_count, 0)                            AS previous_occupant_count,
+  po.previous_customer_until,
+  COALESCE(po.previous_customer_count, 0)                            AS previous_customer_count,
   a.rate_display_name,
   a.autopay_enrolled,
   a.paperless_enrolled,
@@ -138,7 +170,11 @@ SELECT
   p.sqft,
   p.year_built,
   p.heating_fuel,
-  p.envelope_quality
+  p.envelope_quality,
+  -- Linkage context: what sits below/around the customer grain.
+  lk.current_premises,
+  lk.current_accounts,
+  hy.parent_org_name
 FROM acct
 JOIN {{catalog}}.{{schema}}.dim_account a        ON a.account_id = acct.account_id
 JOIN {{catalog}}.{{schema}}.dim_customer c       ON c.customer_id = acct.customer_id
@@ -148,5 +184,7 @@ LEFT JOIN cur_link cl  ON cl.account_id = acct.account_id
 LEFT JOIN prior_occ po ON po.premise_id = acct.premise_id
 LEFT JOIN site_usage su ON true
 LEFT JOIN site_peer  spb ON true
+LEFT JOIN linkage lk ON true
+LEFT JOIN hierarchy hy ON true
 LEFT JOIN {{catalog}}.{{schema}}.ml_complaint_risk_scores s ON s.customer_id = acct.customer_id
 LEFT JOIN {{catalog}}.{{schema}}.ml_ev_detection_predictions ev ON ev.customer_id = acct.customer_id

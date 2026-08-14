@@ -16,7 +16,7 @@ resources:
       channel: ${var.sdp_channel}
       serverless: true
       usage_policy_id: ${var.serverless_usage_policy_id}
-      tags: { demo: customer-360-for-utilities }
+      tags: ${var.data_asset_tags}
       libraries:
         - file: { path: ../src/10_ingest/tiger_counties/raw_counties.sql }
       configuration:
@@ -32,7 +32,7 @@ resources:
       channel: ${var.sdp_channel}
       serverless: true
       usage_policy_id: ${var.serverless_usage_policy_id}
-      tags: { demo: customer-360-for-utilities }
+      tags: ${var.data_asset_tags}
       libraries:
         - file: { path: ../src/10_ingest/buildings/raw_buildings.sql }
         - file: { path: ../src/10_ingest/buildings_curate/buildings.sql }
@@ -59,7 +59,7 @@ resources:
       channel: ${var.sdp_channel}
       serverless: true
       usage_policy_id: ${var.serverless_usage_policy_id}
-      tags: { demo: customer-360-for-utilities }
+      tags: ${var.data_asset_tags}
       # All generator SQL lives under transformations/ and is picked up by glob —
       # to add or remove a dataset, just drop or delete a
       # src/20_synthetic/transformations/<module>/raw_*.sql file. SDP resolves the
@@ -91,6 +91,10 @@ resources:
         history_months: ${var.history_months}
         outages_per_year: ${var.outages_per_year}
         llm_endpoint: ${var.llm_endpoint}
+        n_guaranteed_chains_floor: ${var.n_guaranteed_chains_floor}
+        chain_fraction: ${var.chain_fraction}
+        n_second_homes_floor: ${var.n_second_homes_floor}
+        second_home_fraction: ${var.second_home_fraction}
 
     # ─────────────────────────── 30_curated ──────────────────────────
     curated:
@@ -100,7 +104,7 @@ resources:
       channel: ${var.sdp_channel}
       serverless: true
       usage_policy_id: ${var.serverless_usage_policy_id}
-      tags: { demo: customer-360-for-utilities }
+      tags: ${var.data_asset_tags}
       # All dim/fact/bridge SQL lives under transformations/ and is picked up by
       # glob — add or remove a curated table by dropping or deleting a
       # src/30_curated/transformations/*.sql file. SDP builds the DAG from table
@@ -134,7 +138,7 @@ resources:
       channel: ${var.sdp_channel}
       serverless: true
       usage_policy_id: ${var.serverless_usage_policy_id}
-      tags: { demo: customer-360-for-utilities }
+      tags: ${var.data_asset_tags}
       # One file: entry per model's feature view. To add a model, drop a
       # src/40_ml/<model>/ folder and add its features.sql line here (the
       # matching train/score/comments tasks are copied in jobs.yml — see there).

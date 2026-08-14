@@ -1,14 +1,15 @@
 import { useMemo, useState } from "react";
-import { useAnalyticsQuery, Tabs, TabsList, TabsTrigger, TabsContent } from "@databricks/appkit-ui/react";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@databricks/appkit-ui/react";
+import { useC360Query } from "../queryUtils";
 import { sql } from "@databricks/appkit-ui/js";
+import { rows } from "../queryUtils";
 import {
   ResponsiveContainer, LineChart, Line, BarChart, Bar,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
 } from "recharts";
 import type { InspectorSubject } from "../PremiseInspector";
 
-// Customer Satisfaction & Experience view (design doc:
-// docs/csat-experience-view-design.md). Three tabs: Overview (KPI band, CSAT
+// Customer Satisfaction & Experience view. Three tabs: Overview (KPI band, CSAT
 // trend, channel breakdown, journey breakdown, segmentation), Drivers &
 // Follow-up (driver analysis, operational correlation, survey health with an
 // NPS response-rate denominator), and Voice of Customer (verbatim feed +
@@ -391,9 +392,10 @@ function FollowupQueue({
 }
 
 export function CsatView({ onJumpToSubject }: { onJumpToSubject: (subject: InspectorSubject) => void }) {
-  const demoConfig = useAnalyticsQuery<DemoConfigRow>("demo_config", {});
-  const asOfDate = demoConfig.data?.[0]?.as_of_date ?? DEFAULT_AS_OF_DATE;
-  const historyMonths = num(demoConfig.data?.[0]?.history_months) ?? DEFAULT_HISTORY_MONTHS;
+  const demoConfig = useC360Query<DemoConfigRow>("demo_config", {});
+  const demoConfigRow = rows(demoConfig.data)[0];
+  const asOfDate = demoConfigRow?.as_of_date ?? DEFAULT_AS_OF_DATE;
+  const historyMonths = num(demoConfigRow?.history_months) ?? DEFAULT_HISTORY_MONTHS;
 
   // "recent12"/"prior12" split the display window into its trailing 12
   // months and the 12 months before that (config-driven from
@@ -421,38 +423,38 @@ export function CsatView({ onJumpToSubject }: { onJumpToSubject: (subject: Inspe
     [dateFrom, dateTo],
   );
 
-  const kpis = useAnalyticsQuery<KpiRow>("csat_kpis", scopedParams);
-  const trend = useAnalyticsQuery<TrendRow>("csat_trend", scopedParams);
-  const channel = useAnalyticsQuery<ChannelRow>("csat_by_channel", scopedParams);
-  const journey = useAnalyticsQuery<JourneyRow>("csat_by_journey", scopedParams);
-  const segments = useAnalyticsQuery<SegmentRow>("csat_by_segment", unscopedParams);
-  const drivers = useAnalyticsQuery<DriverRow>("csat_drivers", scopedParams);
-  const correlation = useAnalyticsQuery<CorrelationRow>("csat_operational_correlation", scopedParams);
-  const surveyHealth = useAnalyticsQuery<SurveyHealthRow>("csat_survey_health", scopedParams);
-  const verbatims = useAnalyticsQuery<VerbatimRow>("csat_verbatims", scopedParams);
-  const followup = useAnalyticsQuery<FollowupRow>("csat_followup_queue", scopedParams);
+  const kpis = useC360Query<KpiRow>("csat_kpis", scopedParams);
+  const trend = useC360Query<TrendRow>("csat_trend", scopedParams);
+  const channel = useC360Query<ChannelRow>("csat_by_channel", scopedParams);
+  const journey = useC360Query<JourneyRow>("csat_by_journey", scopedParams);
+  const segments = useC360Query<SegmentRow>("csat_by_segment", unscopedParams);
+  const drivers = useC360Query<DriverRow>("csat_drivers", scopedParams);
+  const correlation = useC360Query<CorrelationRow>("csat_operational_correlation", scopedParams);
+  const surveyHealth = useC360Query<SurveyHealthRow>("csat_survey_health", scopedParams);
+  const verbatims = useC360Query<VerbatimRow>("csat_verbatims", scopedParams);
+  const followup = useC360Query<FollowupRow>("csat_followup_queue", scopedParams);
 
-  const k = kpis.data?.[0];
-  const trendData = (trend.data || []).map((r) => ({
+  const k = rows(kpis.data)[0];
+  const trendData = rows(trend.data).map((r) => ({
     year_month: r.year_month,
     top2box: num(r.top2box_pct),
     target: num(r.csat_target),
   }));
 
-  const driverRows = drivers.data || [];
+  const driverRows = rows(drivers.data);
 
-  const outageRows = (correlation.data || [])
+  const outageRows = rows(correlation.data)
     .filter((r) => r.driver_type === "outage_exposure")
     .slice()
     .sort((a, b) => a.bucket_order - b.bucket_order)
     .map((r) => ({ bucket: r.bucket, nps_score: num(r.nps_score) }));
-  const billShockRows = (correlation.data || [])
+  const billShockRows = rows(correlation.data)
     .filter((r) => r.driver_type === "bill_shock")
     .slice()
     .sort((a, b) => a.bucket_order - b.bucket_order)
     .map((r) => ({ bucket: r.bucket, top2box_pct: num(r.top2box_pct) }));
 
-  const healthRows = surveyHealth.data || [];
+  const healthRows = rows(surveyHealth.data);
   const volumeRows = healthRows.filter((r) => r.metric_type === "volume");
   const rateRows = healthRows
     .filter((r) => r.metric_type === "response_rate")
@@ -467,8 +469,8 @@ export function CsatView({ onJumpToSubject }: { onJumpToSubject: (subject: Inspe
     return row;
   });
 
-  const verbatimRows = verbatims.data || [];
-  const followupRows = followup.data || [];
+  const verbatimRows = rows(verbatims.data);
+  const followupRows = rows(followup.data);
 
   return (
     <div className="csat-view">
@@ -576,10 +578,10 @@ export function CsatView({ onJumpToSubject }: { onJumpToSubject: (subject: Inspe
           touchpoints aren't instrumented yet.
         </p>
         {channel.loading && <div className="loading">Loading…</div>}
-        {!channel.loading && (channel.data || []).length > 0 && (
+        {!channel.loading && rows(channel.data).length > 0 && (
           <div style={{ width: "100%", height: 220 }}>
             <ResponsiveContainer>
-              <BarChart data={channel.data} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
+              <BarChart data={rows(channel.data)} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" />
                 <XAxis dataKey="media_type" tick={{ fontSize: 11 }} />
                 <YAxis tick={{ fontSize: 10 }} domain={[0, 100]} />
@@ -589,16 +591,16 @@ export function CsatView({ onJumpToSubject }: { onJumpToSubject: (subject: Inspe
             </ResponsiveContainer>
           </div>
         )}
-        {!channel.loading && (channel.data || []).length === 0 && <div className="empty-state">No data.</div>}
+        {!channel.loading && rows(channel.data).length === 0 && <div className="empty-state">No data.</div>}
       </div>
 
       <div className="card">
         <h2>CSAT by Journey / Transaction Type</h2>
         {journey.loading && <div className="loading">Loading…</div>}
-        {!journey.loading && (journey.data || []).length > 0 && (
+        {!journey.loading && rows(journey.data).length > 0 && (
           <div style={{ width: "100%", height: 260 }}>
             <ResponsiveContainer>
-              <BarChart data={journey.data} layout="vertical" margin={{ top: 8, right: 24, bottom: 0, left: 8 }}>
+              <BarChart data={rows(journey.data)} layout="vertical" margin={{ top: 8, right: 24, bottom: 0, left: 8 }}>
                 <CartesianGrid strokeDasharray="3 3" />
                 <XAxis type="number" domain={[0, 100]} tick={{ fontSize: 10 }} />
                 <YAxis type="category" dataKey="journey" width={140} tick={{ fontSize: 11 }} />
@@ -608,14 +610,14 @@ export function CsatView({ onJumpToSubject }: { onJumpToSubject: (subject: Inspe
             </ResponsiveContainer>
           </div>
         )}
-        {!journey.loading && (journey.data || []).length === 0 && <div className="empty-state">No data.</div>}
+        {!journey.loading && rows(journey.data).length === 0 && <div className="empty-state">No data.</div>}
       </div>
 
       <div className="card">
         <h2>Segmentation</h2>
         {segments.loading && <div className="loading">Loading…</div>}
-        {!segments.loading && (segments.data || []).length > 0 && <SegmentBreakdown rows={segments.data || []} />}
-        {!segments.loading && (segments.data || []).length === 0 && <div className="empty-state">No data.</div>}
+        {!segments.loading && rows(segments.data).length > 0 && <SegmentBreakdown rows={rows(segments.data)} />}
+        {!segments.loading && rows(segments.data).length === 0 && <div className="empty-state">No data.</div>}
       </div>
 
         </TabsContent>

@@ -1,13 +1,22 @@
--- Is this customer's premise currently without power? Returns 0 rows if not,
--- or 1 row with the live incident's restoration ETA / cause / crew status for
--- the customer profile's "currently without power" banner.
+-- Is any of this customer's current premises without power? Returns 0 rows if
+-- not, or the worst/earliest live incident across the customer's own sites for
+-- the "currently without power" banner.
+-- Resolves to all current premises via hierarchy_version (direct scope —
+-- hv.customer_id, is_current=true), covering single- and multi-site customers.
 
 -- @param account_number STRING
 
 WITH acct AS (
-  SELECT premise_id
-  FROM {{catalog}}.{{schema}}.dim_account
-  WHERE account_number = :account_number
+  SELECT a.customer_id
+  FROM {{catalog}}.{{schema}}.dim_account a
+  WHERE a.account_number = :account_number
+),
+current_premises AS (
+  SELECT DISTINCT hv.premise_id
+  FROM acct
+  JOIN {{catalog}}.{{schema}}.hierarchy_version hv
+    ON hv.customer_id = acct.customer_id
+   AND hv.is_current
 )
 SELECT
   i.active_outage_id,
@@ -19,9 +28,10 @@ SELECT
   e.weather_category,
   e.crew_status,
   e.n_customers_out
-FROM acct
+FROM current_premises cp
 JOIN {{catalog}}.{{schema}}.fact_active_outage_customer_impact i
-  ON i.premise_id = acct.premise_id AND i.still_out
+  ON i.premise_id = cp.premise_id AND i.still_out
 JOIN {{catalog}}.{{schema}}.fact_active_outage_event e
   ON e.active_outage_id = i.active_outage_id
+ORDER BY i.out_since ASC
 LIMIT 1

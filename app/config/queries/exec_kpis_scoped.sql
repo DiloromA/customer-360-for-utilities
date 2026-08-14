@@ -7,7 +7,7 @@
 -- recent_complaint_count_90d the map's complaint layer uses, so the strip and
 -- the map agree.
 --
--- Customers in view = current occupant per premise (bridge_account_premise where
+-- Customers in view = current customer per premise (bridge_account_premise where
 -- is_current → dim_customer).
 
 -- @param south STRING  -- viewport bounds, passed as strings, CAST to DOUBLE

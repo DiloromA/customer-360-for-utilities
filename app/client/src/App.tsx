@@ -1,19 +1,23 @@
-import { useState, useMemo, useEffect } from "react";
-import { useAnalyticsQuery, Tabs, TabsList, TabsTrigger, TabsContent } from "@databricks/appkit-ui/react";
+import { useState, useMemo, useEffect, lazy, Suspense } from "react";
+import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@databricks/appkit-ui/react";
+import { useC360Query } from "./queryUtils";
 import { sql } from "@databricks/appkit-ui/js";
+import { rows } from "./queryUtils";
 import { ExplorerMap, type MapFocusRequest } from "./ExplorerMap";
-import { PremiseDetail, PivotChips, shortId, type InspectorSubject } from "./PremiseInspector";
+import { PremiseDetail, PivotChips, LinkageStrip, shortId, type InspectorSubject, type PremiseRosterEntry } from "./PremiseInspector";
 import { OwnerDetail } from "./OwnerInspector";
 import { UTILITY_NAME, PRODUCT_NAME } from "./config";
 import { localityText } from "./filters";
 import { NavRail } from "./nav/NavRail";
 import { useNavState } from "./nav/useNavState";
-import { NAV_ITEMS, DEFAULT_VIEW } from "./nav/navConfig";
-import { PlaceholderView } from "./views/PlaceholderView";
-import { DataModelView } from "./views/DataModelView";
-import { DocumentationView } from "./views/DocumentationView";
-import { MetricsCatalogView } from "./views/MetricsCatalogView";
-import { CsatView } from "./views/CsatView";
+import { DEFAULT_VIEW } from "./nav/navConfig";
+// Non-Explorer views are lazy-loaded so their chart/graph code doesn't land
+// on the Explorer's critical path. Each chunk is fetched on first nav click.
+const DataModelView = lazy(() => import("./views/DataModelView").then((m) => ({ default: m.DataModelView })));
+const DocumentationView = lazy(() => import("./views/DocumentationView").then((m) => ({ default: m.DocumentationView })));
+const MetricsCatalogView = lazy(() => import("./views/MetricsCatalogView").then((m) => ({ default: m.MetricsCatalogView })));
+const CsatView = lazy(() => import("./views/CsatView").then((m) => ({ default: m.CsatView })));
 import {
   Bar,
   LineChart,
@@ -32,11 +36,13 @@ import {
 // ────────────────────────────────────────────────────────────────────
 
 interface PickerRow {
-  account_number: string;
+  account_number: string | null;   // null for commercial_parent org results
+  customer_number: string;
+  customer_name: string | null;    // fictional org label for commercial_parent
   customer_class: string;
-  service_address: string;
-  service_city: string;
-  county: string;
+  service_address: string | null;  // null for commercial_parent org results
+  service_city: string | null;
+  county: string | null;
   engagement_tier: string;
   payment_stressed_flag: boolean;
   high_user_flag: boolean;
@@ -46,9 +52,10 @@ interface PickerRow {
   liheap_eligible: boolean;
   recent_complaint_count_90d: number;
   recent_outage_minutes_90d: number;
-  latitude?: number;  // present on search results (for fly-to)
+  portfolio_premise_count: number | null; // non-null for commercial_parent
+  latitude?: number;
   longitude?: number;
-  archetype?: string; // present only on search results
+  archetype?: string;
 }
 
 interface HeaderRow {
@@ -56,6 +63,10 @@ interface HeaderRow {
   premise_number: string;
   customer_number: string;
   customer_class: string;
+  // Identity for the profile title: org name for commercial parties, NULL for
+  // residential (fall back to the in-focus address). See customer_header.sql.
+  customer_name: string | null;
+  customer_type: string;
   language_preference: string;
   critical_care_flag: boolean;
   liheap_eligible: boolean;
@@ -74,8 +85,8 @@ interface HeaderRow {
   peer_sqft_band: string;
   customer_since_date: string;
   tenant_since: string | null;
-  previous_occupant_until: string | null;
-  previous_occupant_count: number;
+  previous_customer_until: string | null;
+  previous_customer_count: number;
   rate_display_name: string;
   autopay_enrolled: boolean;
   paperless_enrolled: boolean;
@@ -105,6 +116,10 @@ interface HeaderRow {
   year_built: number;
   heating_fuel: string;
   envelope_quality: string;
+  // Linkage context (customer_header.sql): what sits below/around this grain.
+  current_premises: number | null;
+  current_accounts: number | null;
+  parent_org_name: string | null;
 }
 
 interface BillRow {
@@ -146,6 +161,7 @@ interface OutageRow {
   is_major_event_day: boolean;
   duration_bucket: string;
   priority_restoration_flag: boolean;
+  premise_number: string;
 }
 
 interface RecommendationRow {
@@ -191,7 +207,6 @@ function derDeviceLabel(deviceType: string): string {
     case "HEAT_PUMP":   return "Heat pump";
     case "SMART_TSTAT": return "Smart thermostat";
     case "PV":          return "Solar PV";
-    case "BESS":        return "Battery storage";
     default:            return deviceType;
   }
 }
@@ -206,7 +221,7 @@ interface LoadProfileRow {
 
 // One service event on the customer's account timeline: move-in / move-out / rate
 // switch / meter swap (from fact_service_event). Events not belonging to the
-// current account (is_current_account = false) are a prior occupant's.
+// current account (is_current_account = false) are a prior customer's.
 interface TimelineRow {
   service_event_id: number;
   event_type: string;
@@ -215,6 +230,10 @@ interface TimelineRow {
   account_id: number | null;
   meter_id: number | null;
   service_agreement_id: number | null;
+  // The site each event happened at — this timeline spans every premise the
+  // customer has held, so a multi-site customer's rows carry different addresses.
+  service_address: string | null;
+  service_city: string | null;
   is_current_account: boolean;
 }
 
@@ -234,7 +253,7 @@ interface AccountPremiseRow {
   link_start_date: string | null;
   link_end_date: string | null;
   is_current: boolean | null;
-  occupancy_type: string | null;
+  tenancy_type: string | null;
   link_termination_reason: string | null;
 }
 
@@ -369,6 +388,19 @@ export default function App() {
   const [focus, setFocus] = useState<MapFocusRequest | null>(null);
   const nav = useNavState();
 
+  // Drawer pivot: switch the profile subject AND keep the map behind in sync.
+  // Switching to a specific location (e.g. the multi-site picker's "other"
+  // home) flies the map to that premise and rings it — so when the user closes
+  // the drawer the map is already centred on where they navigated, not stranded
+  // on the premise they started from. Coords ride along on the premise subject
+  // (from the roster); absent coords → subject change only, no map move.
+  const pivotFull = (s: InspectorSubject) => {
+    setFullSubject(s);
+    if (s.kind === "premise" && s.lat != null && s.lon != null) {
+      setFocus({ premiseNumber: s.premiseNumber, lat: s.lat, lon: s.lon, ts: Date.now() });
+    }
+  };
+
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
     localStorage.setItem("c360-theme", theme);
@@ -376,16 +408,20 @@ export default function App() {
 
   useEffect(() => { document.title = PRODUCT_NAME; }, []);
 
-  // The active nav item outside Explorer — rendered as a placeholder card.
-  // (Explorer itself is handled separately below so ExplorerMap stays mounted.)
-  const activePlaceholder = NAV_ITEMS.find(
-    (i) => i.id === nav.activeView && i.status === "placeholder"
-  );
-
   return (
     <div className={`app no-picker${nav.collapsed ? " nav-collapsed" : ""}`}>
       <header className="topbar">
         <div className="topbar-brand">
+          <button
+            type="button"
+            className="nav-collapse-toggle"
+            onClick={nav.toggleCollapsed}
+            aria-expanded={!nav.collapsed}
+            aria-label={nav.collapsed ? "Expand navigation" : "Collapse navigation"}
+            title={nav.collapsed ? "Expand navigation (Ctrl/Cmd+B)" : "Collapse navigation (Ctrl/Cmd+B)"}
+          >
+            {nav.collapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
+          </button>
           <BrandLogo />
           <span className="brand-utility-name">{UTILITY_NAME}</span>
         </div>
@@ -395,12 +431,16 @@ export default function App() {
             onPick={(row) => {
               setFullSubject(null);
               nav.setActiveView(DEFAULT_VIEW);
-              setFocus({
-                account: row.account_number,
-                lat: Number(row.latitude),
-                lon: Number(row.longitude),
-                ts: Date.now(),
-              });
+              // commercial_parent rows have no premise and no lat/lon, so skip
+              // the map fly-to rather than fabricate coordinates.
+              if (row.latitude != null && row.longitude != null) {
+                setFocus({
+                  account: row.account_number ?? undefined,
+                  lat: Number(row.latitude),
+                  lon: Number(row.longitude),
+                  ts: Date.now(),
+                });
+              }
             }}
           />
           <button className="theme-toggle" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
@@ -413,7 +453,6 @@ export default function App() {
         activeView={nav.activeView}
         onSelect={nav.setActiveView}
         collapsed={nav.collapsed}
-        onToggleCollapsed={nav.toggleCollapsed}
       />
 
       <main className="main">
@@ -424,19 +463,17 @@ export default function App() {
         <div className={`explorer-root${nav.activeView === DEFAULT_VIEW ? "" : " is-hidden"}`}>
           <ExplorerMap onJumpToSubject={setFullSubject} focus={focus} visible={nav.activeView === DEFAULT_VIEW} />
         </div>
-        {nav.activeView === "data-model" && <DataModelView />}
-        {nav.activeView === "documentation" && (
-          <DocumentationView onOpenDataModel={() => nav.setActiveView("data-model")} />
-        )}
-        {nav.activeView === "metrics-catalog" && <MetricsCatalogView />}
-        {nav.activeView === "csat" && <CsatView onJumpToSubject={setFullSubject} />}
-        {activePlaceholder && (
-          <PlaceholderView
-            title={activePlaceholder.label}
-            icon={activePlaceholder.icon}
-            blurb={activePlaceholder.blurb}
-          />
-        )}
+        <Suspense fallback={<div className="loading" style={{ padding: 32 }}>Loading…</div>}>
+          {nav.activeView === "data-model" && <DataModelView />}
+          {nav.activeView === "documentation" && (
+            <DocumentationView
+              onOpenDataModel={() => nav.setActiveView("data-model")}
+              onOpenMetricsCatalog={() => nav.setActiveView("metrics-catalog")}
+            />
+          )}
+          {nav.activeView === "metrics-catalog" && <MetricsCatalogView />}
+          {nav.activeView === "csat" && <CsatView onJumpToSubject={setFullSubject} />}
+        </Suspense>
       </main>
 
       {fullSubject && (
@@ -452,11 +489,11 @@ export default function App() {
             </div>
             <div className="cust-drawer-body">
               {fullSubject.kind === "premise" ? (
-                <PremiseDetail premiseNumber={fullSubject.premiseNumber} onPivot={setFullSubject} />
+                <PremiseDetail premiseNumber={fullSubject.premiseNumber} onPivot={pivotFull} />
               ) : fullSubject.kind === "owner" ? (
                 <OwnerDetail
                   ownerNumber={fullSubject.ownerNumber}
-                  onPivot={setFullSubject}
+                  onPivot={pivotFull}
                   onShowAllLocations={(points) => {
                     if (points.length === 0) return;
                     setFullSubject(null);
@@ -467,7 +504,7 @@ export default function App() {
               ) : (
                 <CustomerDetail
                   accountNumber={fullSubject.accountNumber}
-                  onPivot={setFullSubject}
+                  onPivot={pivotFull}
                   onShowAllLocations={(points) => {
                     if (points.length === 0) return;
                     const account = fullSubject.accountNumber;
@@ -499,11 +536,11 @@ function TopbarSearch({ onPick }: { onPick: (row: PickerRow) => void }) {
   const trimmed = search.trim();
   const isSearching = trimmed.length >= 2;
   const searchParams = useMemo(() => ({ search_term: sql.string(trimmed) }), [trimmed]);
-  const searchQuery = useAnalyticsQuery<PickerRow>(
+  const searchQuery = useC360Query<PickerRow>(
     "customer_search",
     isSearching ? searchParams : { search_term: sql.string("__none__") },
   );
-  const rows = (isSearching ? (searchQuery.data as PickerRow[] | undefined) : undefined) || [];
+  const searchRows = isSearching ? rows(searchQuery.data) : [];
 
   return (
     <div className="topbar-search">
@@ -519,19 +556,25 @@ function TopbarSearch({ onPick }: { onPick: (row: PickerRow) => void }) {
       {open && isSearching && (
         <div className="topbar-search-results">
           {searchQuery.loading && <div className="loading">Searching…</div>}
-          {!searchQuery.loading && rows.length === 0 && <div className="empty-state">No matches.</div>}
-          {rows.slice(0, 30).map((r) => (
+          {!searchQuery.loading && searchRows.length === 0 && <div className="empty-state">No matches.</div>}
+          {searchRows.slice(0, 30).map((r) => (
             <button
-              key={r.account_number}
+              key={r.account_number ?? r.customer_number}
               type="button"
               className="search-result-row"
               // mousedown (not click) so the pick registers before the input's
               // blur closes the dropdown.
               onMouseDown={(e) => { e.preventDefault(); onPick(r); setSearch(""); setOpen(false); }}
             >
-              <div className="name">{r.service_address}</div>
+              {r.customer_name
+                ? <div className="name">{r.customer_name}</div>
+                : <div className="name">{r.service_address}</div>
+              }
               <div className="meta">
-                {localityText({ city: r.service_city, county: r.county })} · {r.customer_class} · {r.engagement_tier} eng
+                {r.customer_name
+                  ? `${r.portfolio_premise_count ?? ""} sites · ${r.customer_class}`
+                  : `${localityText({ city: r.service_city, county: r.county })} · ${r.customer_class} · ${r.engagement_tier} eng`
+                }
               </div>
             </button>
           ))}
@@ -539,6 +582,16 @@ function TopbarSearch({ onPick }: { onPick: (row: PickerRow) => void }) {
       )}
     </div>
   );
+}
+
+// One current service location, for the Premise pivot chip's location switcher.
+interface CustomerPremiseRow {
+  premise_number: string;
+  service_address: string | null;
+  service_city: string | null;
+  service_state: string | null;
+  latitude: number | null;
+  longitude: number | null;
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -554,20 +607,36 @@ function CustomerDetail({
 }) {
   const params = useMemo(() => ({ account_number: sql.string(accountNumber) }), [accountNumber]);
 
-  const header = useAnalyticsQuery<HeaderRow>("customer_header", params);
-  const bills = useAnalyticsQuery<BillRow>("customer_bills", params);
-  const complaints = useAnalyticsQuery<ComplaintRow>("customer_complaints", params);
-  const outages = useAnalyticsQuery<OutageRow>("customer_outages", params);
-  const recos = useAnalyticsQuery<RecommendationRow>("customer_recommendations", params);
-  const derOpps = useAnalyticsQuery<DerOpportunityRow>("customer_der_opportunities", params);
-  const timeline = useAnalyticsQuery<TimelineRow>("customer_timeline", params);
-  const activeOutage = useAnalyticsQuery<ActiveOutageRow>("customer_active_outage", params);
+  const header = useC360Query<HeaderRow>("customer_header", params);
+  const bills = useC360Query<BillRow>("customer_bills", params);
+  const complaints = useC360Query<ComplaintRow>("customer_complaints", params);
+  const outages = useC360Query<OutageRow>("customer_outages", params);
+  const recos = useC360Query<RecommendationRow>("customer_recommendations", params);
+  const derOpps = useC360Query<DerOpportunityRow>("customer_der_opportunities", params);
+  const timeline = useC360Query<TimelineRow>("customer_timeline", params);
+  const activeOutage = useC360Query<ActiveOutageRow>("customer_active_outage", params);
+  // Current-premise roster for the Premise pivot chip's location switcher —
+  // matches the compact rail card (CustomerDrillPanel), so the multi-site
+  // dropdown that appears there also appears in the full profile.
+  const premisesQ = useC360Query<CustomerPremiseRow>("customer_premises", params);
+  const premiseRoster: PremiseRosterEntry[] = useMemo(
+    () => rows(premisesQ.data).map((r) => ({
+      premiseNumber: r.premise_number,
+      address: r.service_address,
+      lat: r.latitude,
+      lon: r.longitude,
+    })),
+    [premisesQ.data],
+  );
+
+  const headerRows = rows(header.data);
+  const activeOutageRows = rows(activeOutage.data);
 
   if (header.loading) return <div className="loading">Loading customer…</div>;
   if (header.error)   return <div className="error">{String(header.error)}</div>;
-  if (!header.data || header.data.length === 0) return <div className="empty-state">No data</div>;
+  if (headerRows.length === 0) return <div className="empty-state">No data</div>;
 
-  const c = header.data[0];
+  const c = headerRows[0];
 
   return (
     <>
@@ -576,21 +645,23 @@ function CustomerDetail({
         subject={{ kind: "customer", accountNumber }}
         locationLabel={c.service_address}
         premiseNumber={c.premise_number}
+        premiseRoster={premiseRoster}
         onPivot={onPivot}
       />
-      <AlertsBanner c={c} derOpps={derOpps.data || []} activeOutage={activeOutage.data?.[0] ?? null} />
+      <LinkageStrip grain="customer" premises={c.current_premises} parentOrg={c.parent_org_name} />
+      <AlertsBanner c={c} derOpps={rows(derOpps.data)} activeOutage={activeOutageRows[0] ?? null} />
       <Tabs defaultValue="overview" className="profile-tabs">
         <TabsList>
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="accounts">Accounts &amp; Premises</TabsTrigger>
         </TabsList>
         <TabsContent value="overview">
-          <CoachCard recos={recos.data || []} recosLoading={recos.loading} />
-          <TimelineCard rows={timeline.data || []} loading={timeline.loading} />
-          <BillChart rows={bills.data || []} loading={bills.loading} />
-          <LoadProfileCard accountNumber={accountNumber} bills={bills.data || []} />
-          <ComplaintCard rows={complaints.data || []} loading={complaints.loading} />
-          <OutageCard rows={outages.data || []} loading={outages.loading} />
+          <CoachCard recos={rows(recos.data)} recosLoading={recos.loading} />
+          <TimelineCard rows={rows(timeline.data)} loading={timeline.loading} />
+          <BillChart rows={rows(bills.data)} loading={bills.loading} />
+          <LoadProfileCard accountNumber={accountNumber} bills={rows(bills.data)} />
+          <ComplaintCard rows={rows(complaints.data)} loading={complaints.loading} />
+          <OutageCard rows={rows(outages.data)} loading={outages.loading} />
         </TabsContent>
         <TabsContent value="accounts">
           <AccountsPremisesTab accountNumber={accountNumber} onShowAllLocations={onShowAllLocations} />
@@ -807,12 +878,16 @@ const SERVICE_EVENT_META: Record<string, { label: string; icon: string }> = {
 };
 
 function TimelineCard({ rows, loading }: { rows: TimelineRow[]; loading: boolean }) {
+  // This timeline spans every premise the customer has held. When more than one
+  // address appears, stamp each row with its site — otherwise two move-ins at a
+  // second home (or before/after a relocation) read as an impossible sequence.
+  const multiSite = new Set(rows.map((r) => r.service_address).filter(Boolean)).size > 1;
   return (
     <div className="card">
       <h2>Service Timeline ({rows.length})</h2>
       <div className="subtle" style={{ marginBottom: 8 }}>
-        Move-in / move-out, rate switches, and meter swaps at this premise — the
-        service events behind the bills, outages and complaints below.
+        Move-in / move-out, rate switches, and meter swaps across this customer's
+        service locations — the events behind the bills, outages and complaints below.
       </div>
       {loading && <div className="loading">Loading…</div>}
       {!loading && rows.length === 0 && <div className="empty-state">No service events on file.</div>}
@@ -820,13 +895,20 @@ function TimelineCard({ rows, loading }: { rows: TimelineRow[]; loading: boolean
         <ul className="theme-list">
           {rows.map((r) => {
             const meta = SERVICE_EVENT_META[r.event_type] || { label: r.event_type.replace(/_/g, " "), icon: "•" };
+            // "Previous customer" only applies to events on a DIFFERENT account.
+            // Physical, account-less events (meter swaps) belong to no customer —
+            // is_current_account is null for them, so gate on a real account_id.
+            const isPriorCustomer = r.account_id != null && !bool(r.is_current_account);
             return (
               <li key={r.service_event_id}>
                 <span className="theme-name">
                   <span style={{ marginRight: 6 }}>{meta.icon}</span>
                   {meta.label}
                   {r.detail ? ` — ${r.detail}` : ""}
-                  {!bool(r.is_current_account) && <span className="badge neutral" style={{ marginLeft: 6 }}>previous occupant</span>}
+                  {multiSite && r.service_address && (
+                    <span className="subtle" style={{ marginLeft: 6 }}>· 📍 {r.service_address}</span>
+                  )}
+                  {isPriorCustomer && <span className="badge neutral" style={{ marginLeft: 6 }}>previous customer</span>}
                 </span>
                 <span className="theme-count">{fmtDate(r.event_date)}</span>
               </li>
@@ -850,15 +932,15 @@ function AccountsPremisesTab({
 }: { accountNumber: string; onShowAllLocations: (points: { lat: number; lon: number }[]) => void }) {
   const params = useMemo(() => ({ account_number: sql.string(accountNumber) }), [accountNumber]);
 
-  const accountsPremises = useAnalyticsQuery<AccountPremiseRow>("customer_accounts_premises", params);
-  const meters = useAnalyticsQuery<MeterHistoryRow>("customer_meter_history", params);
-  const rates = useAnalyticsQuery<RateHistoryRow>("customer_rate_history", params);
-  const changes = useAnalyticsQuery<ProfileChangeRow>("customer_profile_changes", params);
-  const locations = useAnalyticsQuery<CustomerLocationRow>("customer_locations", params);
+  const accountsPremises = useC360Query<AccountPremiseRow>("customer_accounts_premises", params);
+  const meters = useC360Query<MeterHistoryRow>("customer_meter_history", params);
+  const rates = useC360Query<RateHistoryRow>("customer_rate_history", params);
+  const changes = useC360Query<ProfileChangeRow>("customer_profile_changes", params);
+  const locations = useC360Query<CustomerLocationRow>("customer_locations", params);
 
   const accountGroups = useMemo(() => {
     const byAccount = new Map<string, AccountPremiseRow[]>();
-    for (const r of accountsPremises.data || []) {
+    for (const r of rows(accountsPremises.data)) {
       const list = byAccount.get(r.account_number) || [];
       list.push(r);
       byAccount.set(r.account_number, list);
@@ -868,7 +950,7 @@ function AccountsPremisesTab({
 
   const metersByPremise = useMemo(() => {
     const byPremise = new Map<string, MeterHistoryRow[]>();
-    for (const r of meters.data || []) {
+    for (const r of rows(meters.data)) {
       const key = r.service_address || String(r.premise_id);
       const list = byPremise.get(key) || [];
       list.push(r);
@@ -877,7 +959,7 @@ function AccountsPremisesTab({
     return Array.from(byPremise.entries());
   }, [meters.data]);
 
-  const locationPoints = (locations.data || []).map((l) => ({ lat: Number(l.latitude), lon: Number(l.longitude) }));
+  const locationPoints = rows(locations.data).map((l) => ({ lat: Number(l.latitude), lon: Number(l.longitude) }));
 
   return (
     <>
@@ -921,7 +1003,7 @@ function AccountsPremisesTab({
                 <table>
                   <thead>
                     <tr>
-                      <th>Address</th><th>Move in</th><th>Move out</th><th>Occupancy</th><th>Status</th><th>Termination reason</th>
+                      <th>Address</th><th>Move in</th><th>Move out</th><th>Tenancy</th><th>Status</th><th>Termination reason</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -930,7 +1012,7 @@ function AccountsPremisesTab({
                         <td>{r.service_address}{r.service_city ? `, ${r.service_city}` : ""}</td>
                         <td>{fmtDate(r.link_start_date)}</td>
                         <td>{fmtDate(r.link_end_date)}</td>
-                        <td>{(r.occupancy_type || "—").replace(/_/g, " ")}</td>
+                        <td>{(r.tenancy_type || "—").replace(/_/g, " ")}</td>
                         <td><span className={`badge ${bool(r.is_current) ? "good" : "neutral"}`}>{bool(r.is_current) ? "current" : "closed"}</span></td>
                         <td>{(r.link_termination_reason || "—").replace(/_/g, " ")}</td>
                       </tr>
@@ -946,7 +1028,7 @@ function AccountsPremisesTab({
       </div>
 
       <div className="card">
-        <h2>Meter Installation History ({(meters.data || []).length})</h2>
+        <h2>Meter Installation History ({rows(meters.data).length})</h2>
         {meters.loading && <div className="loading">Loading…</div>}
         {!meters.loading && metersByPremise.length === 0 && (
           <div className="empty-state">No meter installs on file.</div>
@@ -975,18 +1057,18 @@ function AccountsPremisesTab({
       </div>
 
       <div className="card">
-        <h2>Rate History ({(rates.data || []).length})</h2>
+        <h2>Rate History ({rows(rates.data).length})</h2>
         {rates.loading && <div className="loading">Loading…</div>}
-        {!rates.loading && (rates.data || []).length === 0 && (
+        {!rates.loading && rows(rates.data).length === 0 && (
           <div className="empty-state">No service agreements on file.</div>
         )}
-        {(rates.data || []).length > 0 && (
+        {rows(rates.data).length > 0 && (
           <table>
             <thead>
               <tr><th>Account</th><th>Rate</th><th>Effective</th><th>Terminated</th><th>Status</th><th>Reason</th></tr>
             </thead>
             <tbody>
-              {(rates.data || []).map((r) => (
+              {rows(rates.data).map((r) => (
                 <tr key={`${r.account_number}-${r.agreement_seq}`}>
                   <td>{r.account_number}</td>
                   <td>{r.rate_display_name || r.rate_schedule}</td>
@@ -1002,18 +1084,18 @@ function AccountsPremisesTab({
       </div>
 
       <div className="card">
-        <h2>Profile Changes ({(changes.data || []).length})</h2>
+        <h2>Profile Changes ({rows(changes.data).length})</h2>
         <div className="subtle" style={{ marginBottom: 8 }}>
           Tracked attribute transitions from the SCD Type 2 history tables —
           critical-care registration and account status changes.
         </div>
         {changes.loading && <div className="loading">Loading…</div>}
-        {!changes.loading && (changes.data || []).length === 0 && (
+        {!changes.loading && rows(changes.data).length === 0 && (
           <div className="empty-state">No tracked changes on file.</div>
         )}
-        {(changes.data || []).length > 0 && (
+        {rows(changes.data).length > 0 && (
           <ul className="theme-list">
-            {(changes.data || []).map((c, idx) => (
+            {rows(changes.data).map((c, idx) => (
               <li key={idx}>
                 <span className="theme-name">
                   {c.change_label}{c.account_number ? <span title={c.account_number}> — {shortId(c.account_number)}</span> : ""}
@@ -1032,24 +1114,34 @@ function AccountsPremisesTab({
 // Header strip
 // ────────────────────────────────────────────────────────────────────
 
+// Customer-grain header. The title identifies the CUSTOMER, not a premise:
+// commercial parties lead with their org name; residential (no name in this
+// dataset) falls back to the in-focus site address, explicitly framed as one
+// of N locations so a multi-site customer never reads as "the customer = this
+// one address". Building / usage / peer facts are site-grained and live on the
+// site-scoped cards below (and the Premise profile a pivot away) — never here.
 function HeaderStrip({ c }: { c: HeaderRow }) {
+  const nPremises = num(c.current_premises) ?? 0;
+  const nAccounts = num(c.current_accounts) ?? 0;
+  const multiSite = nPremises > 1 || nAccounts > 1;
+  const hasName = !!(c.customer_name && c.customer_name.trim());
+  const title = hasName ? c.customer_name : c.service_address;
   return (
     <div className="header-strip">
       <div>
-        <h1>{c.service_address}</h1>
+        <div className="cell-drill-eyebrow">
+          Customer{nPremises > 1 ? ` · 1 of ${nPremises.toLocaleString()} locations` : ""}
+        </div>
+        <h1>{hasName ? "🏢" : "📍"} {title}</h1>
+        <div className="subtle">
+          {c.customer_class} · Customer #{shortId(c.customer_number)} · since {fmtDate(c.tenant_since || c.customer_since_date)}
+        </div>
         <div className="subtle">
           {localityText({ city: c.service_city, county: c.county, state: c.service_state })}
         </div>
-        <div className="subtle">
-          {c.building_subtype} • {c.sqft.toLocaleString()} sqft • built {c.year_built} • {c.heating_fuel.replace("_", " ")} heat
-        </div>
-        <div className="subtle" style={{ marginTop: 6 }}>
-          Customer since {fmtDate(c.tenant_since || c.customer_since_date)}
-        </div>
-        {c.previous_occupant_count > 0 && c.previous_occupant_until && (
-          <div className="subtle" style={{ marginTop: 2 }}>
-            Previous occupant at this premise until {fmtDate(c.previous_occupant_until)}
-            {c.previous_occupant_count > 1 ? ` (${c.previous_occupant_count} prior tenancies)` : ""}
+        {multiSite && (
+          <div className="subtle" style={{ marginTop: 6 }}>
+            {nPremises.toLocaleString()} service location{nPremises === 1 ? "" : "s"} · {nAccounts.toLocaleString()} account{nAccounts === 1 ? "" : "s"}
           </div>
         )}
       </div>
@@ -1060,14 +1152,6 @@ function HeaderStrip({ c }: { c: HeaderRow }) {
         <div className="value">{c.account_status} • {c.account_tenure_band}</div>
         <div className="label" style={{ marginTop: 8 }}>Channel</div>
         <div className="value">{c.preferred_channel}</div>
-      </div>
-      <div className="kpi">
-        <div className="label">Avg Monthly Use</div>
-        <div className="value">{fmtKwh(c.avg_monthly_kwh_12mo)}</div>
-        <div className="label" style={{ marginTop: 8 }}>Peer p75</div>
-        <div className="value">{fmtKwh(c.peer_p75_avg_monthly_kwh)}</div>
-        <div className="label" style={{ marginTop: 8 }}>Peer group</div>
-        <div className="value" style={{ fontSize: 12 }}>{c.peer_building_subtype} • {c.peer_sqft_band}</div>
       </div>
       <div className="kpi">
         <div className="label">Digital adoption</div>
@@ -1182,7 +1266,7 @@ function LoadProfileCard({
     [accountNumber, month, dayType],
   );
 
-  const profile = useAnalyticsQuery<LoadProfileRow>("customer_load_profile", params);
+  const profile = useC360Query<LoadProfileRow>("customer_load_profile", params);
 
   return (
     <div className="card">
@@ -1200,10 +1284,10 @@ function LoadProfileCard({
       </div>
       {profile.loading && <div className="loading">Loading…</div>}
       {profile.error && <div className="error">{String(profile.error)}</div>}
-      {!profile.loading && (profile.data || []).length > 0 && (
+      {!profile.loading && rows(profile.data).length > 0 && (
         <div style={{ width: "100%", height: 220 }}>
           <ResponsiveContainer>
-            <LineChart data={profile.data || []}>
+            <LineChart data={rows(profile.data)}>
               <CartesianGrid strokeDasharray="3 3" />
               <XAxis dataKey="hour_of_day" tick={{ fontSize: 10 }}
                      tickFormatter={(h) => `${h}:00`} />
@@ -1215,7 +1299,7 @@ function LoadProfileCard({
           </ResponsiveContainer>
         </div>
       )}
-      {!profile.loading && (profile.data || []).length === 0 && (
+      {!profile.loading && rows(profile.data).length === 0 && (
         <div className="empty-state">No hourly readings for this period.</div>
       )}
     </div>

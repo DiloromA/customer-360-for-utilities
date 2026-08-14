@@ -12,7 +12,7 @@ resources:
     customer_360_job:
       name: ${bundle.name}_job
       usage_policy_id: ${var.serverless_usage_policy_id}
-      tags: { demo: customer-360-for-utilities }
+      tags: ${var.data_asset_tags}
       environments:
         - environment_key: default
           spec:
@@ -121,6 +121,23 @@ resources:
             # cm_change_feeds re-creates raw_*_changes (new Delta id) every run, which
             # otherwise breaks the AUTO CDC streaming checkpoint.
             full_refresh: true
+        - task_key: curated_contract_assertions
+          depends_on: [{ task_key: pipe_curated }]
+          environment_key: default
+          notebook_task:
+            notebook_path: ../src/30_curated/contract_assertions.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              # Release-config values so the notebook can assert the target's auth
+              # config is internally consistent. Only scalar vars are
+              # threadable here — DAB will not serialize a complex (list) var into a
+              # string base_parameter ("expected string, found sequence"), so the
+              # scopes-list checks (#1/#3) live in app/scripts/check-release-config.py
+              # which reads the rendered bundle JSON. bundle.target gates internal=obo.
+              app_auth_mode: ${var.app_auth_mode}
+              viewer_grantee: ${var.viewer_grantee}
+              bundle_target: ${bundle.target}
         - task_key: curated_table_comments
           depends_on: [{ task_key: pipe_curated }]
           environment_key: default
@@ -129,6 +146,9 @@ resources:
             base_parameters:
               catalog: ${var.catalog}
               schema: ${var.schema}
+              # "false" for a governed workspace whose tag policy rejects our
+              # values (Python tag-policy half). Skips ALTER TABLE SET TAGS.
+              apply_data_asset_tags: ${var.apply_data_asset_tags}
         - task_key: curated_metric_views
           depends_on: [{ task_key: curated_table_comments }]
           environment_key: default
@@ -138,6 +158,7 @@ resources:
               catalog: ${var.catalog}
               schema: ${var.schema}
               as_of_date: ${var.as_of_date}
+              apply_data_asset_tags: ${var.apply_data_asset_tags}
 
         # ─────────────────────────────── 40_ml ──────────────────────────
         # One task group per model, all reading the curated layer. To add a
@@ -174,6 +195,7 @@ resources:
             base_parameters:
               catalog: ${var.catalog}
               schema: ${var.schema}
+              apply_data_asset_tags: ${var.apply_data_asset_tags}
         - task_key: complaint_predictor_train
           depends_on: [{ task_key: ml_build_features }]
           environment_key: default
@@ -200,6 +222,7 @@ resources:
             base_parameters:
               catalog: ${var.catalog}
               schema: ${var.schema}
+              apply_data_asset_tags: ${var.apply_data_asset_tags}
         - task_key: pv_detector_train
           depends_on: [{ task_key: ml_build_features }]
           environment_key: default
@@ -225,5 +248,6 @@ resources:
             base_parameters:
               catalog: ${var.catalog}
               schema: ${var.schema}
+              apply_data_asset_tags: ${var.apply_data_asset_tags}
 
       queue: { enabled: true }

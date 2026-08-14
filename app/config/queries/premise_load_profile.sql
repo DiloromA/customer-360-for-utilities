@@ -1,9 +1,8 @@
 -- Hourly load profile for a chosen month + day type, at this premise.
 -- Premise-native version of customer_load_profile.sql. Grain of
 -- fact_customer_hourly_load_profile is physical: (service_point_id,
--- year_month, day_type, hour_of_day) — no account_id (temporal-realism §5.2:
--- an occupant can change mid-window, so the fact is never account-stamped).
--- A large sub-metered commercial premise (temporal-realism §5.3) has 2-5
+-- year_month, day_type, hour_of_day) — no account_id (a customer can change mid-window, so the fact is never account-stamped).
+-- A large sub-metered commercial premise has 2-5
 -- dim_service_point rows, so sum across them per hour — otherwise this would
 -- return 24×N rows (one set per meter) instead of the site's combined
 -- profile. Keyed by premise_number (STRING) — see premise_header.sql's note

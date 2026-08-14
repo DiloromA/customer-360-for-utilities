@@ -48,7 +48,9 @@ each table feeds.
   `premise_id` (BIGINT).** BIGINT surrogates exceed JS safe-integer range
   and get silently corrupted in the browser; the app never ships
   `premise_id` to the client. The same rule holds for any new BIGINT key
-  you surface.
+  you surface. `premise_number` is the lowercase, unbraced canonical UUID;
+  preserve the source system's exact representation separately as
+  `source_building_id` when lineage requires it.
 - **Effective dating is half-open.** Date-ranged relationships cover
   `[start_date, end_date)`; the live row has `end_date IS NULL` and
   `is_current = true`. Point-in-time resolution is
@@ -79,15 +81,19 @@ CIS maps onto:
 
 | Table | Grain / role | Keys & contract notes |
 |---|---|---|
-| `dim_customer` | One row per **party** (person/org), profile only | `customer_id` / `customer_number`. Carries no `account_id`/`premise_id` — reach the spine through `dim_account` and `dim_service_agreement`. Includes prior occupants (profile, no in-window facts). The disclosed behavioural signals (churn band, usage band, 90-day outage/complaint counts, peer benchmarks) are demo conveniences derived from the facts — populate or drop; the map's cohort lenses read them. |
-| `dim_account` | One row per **billing account** | `account_id` / `account_number` (the deep-link identity), `customer_id` FK. customer→account is 1:many (chains hold N site accounts under a corporate parent; `account_group='consolidated_billing'` marks the parent). |
-| `dim_premise` | One row per **premise** (the place) | `premise_id` / `premise_number`. Building characteristics incl. `building_subtype` (peer grouping) and native GEOMETRY columns. |
-| `dim_service_point` | One row per **point of delivery** (CIM UsagePoint) | `service_point_id` / `service_point_number`, `premise_id` FK. premise→service_point is 1:many (sub-metered commercial premises carry 2–5). The meter asset does *not* live here. |
-| `dim_meter` | One row per **physical meter asset** (CIM EndDeviceAsset) | `meter_id` / `meter_number`. Includes removed/swapped-out meters so historical readings resolve to the meter of record. |
-| `dim_service_agreement` | One row per (account × service_point × rate × validity window) — **the contract** | `service_agreement_id`; FKs to account, customer, premise, service_point; `effective_date`/`termination_date`/`is_current`/`agreement_seq`. The pivot binding the commercial overlay to the physical spine over time, and the carrier of rate-switch history. |
-| `bridge_account_premise` | Effective-dated account↔premise occupancy link | Which account was billing-responsible for a premise during which `[link_start_date, link_end_date)` window — move-in/move-out and tenant turnover. One open link per premise; closed links are prior occupants. `occupancy_type`, `link_termination_reason`. The occupant-timeline UI reads the **full history**, not just `is_current`. |
+| `dim_customer` | One row per **party** (person/org), profile only | `customer_id` / `customer_number`. Carries no `account_id`/`premise_id` — reach the spine through `dim_account` and `dim_service_agreement`. Includes prior customers from closed tenancies (profile, no in-window facts). The disclosed behavioural signals (churn band, usage band, 90-day outage/complaint counts, peer benchmarks) are demo conveniences derived from the facts — populate or drop; the map's cohort lenses read them. |
+| `dim_account` | One row per **billing account** | `account_id` / `account_number` (the deep-link identity), `customer_id` FK. customer→account is 1:many (chains hold N site accounts under a corporate parent; `account_group='consolidated_billing'` marks the parent). It carries no undated premise assignment; use `bridge_account_premise`. |
+| `account_current_premise` | Current-premise seam — one row per account **with an active premise today** | No row for corporate-parent accounts (no current link). LEFT JOIN degrades gracefully. Carries `account_number` so consumers need only one join to reach the premise without going back through `dim_account`. |
+| `dim_premise` | One row per **premise** (the place) | `premise_id` / `premise_number` (canonical unbraced UUID). `source_building_id` preserves the raw FEMA value for lineage. Building characteristics incl. `building_subtype` (peer grouping) and native GEOMETRY columns. |
+| `dim_service_point` | One row per **point of delivery** (CIM UsagePoint) | `service_point_id` / `service_point_number`, `premise_id` FK, `commodity='electric'`. premise→service_point is 1:many (sub-metered commercial premises carry 2–5). The meter asset does *not* live here. |
+| `dim_meter` | One row per **physical meter asset** (CIM EndDeviceAsset) | `meter_id` / `meter_number`, `commodity='electric'`. Includes removed/swapped-out meters so historical readings resolve to the meter of record. It carries no service-point placement; use `meter_installation`. |
+| `dim_service_agreement` | One row per (account × service_point × rate × validity window) — **the contract** | `service_agreement_id`; authoritative FKs to account and service point; `effective_date`/`termination_date`/`is_current`/`agreement_seq`. Customer and premise resolve through the dated commercial and physical paths; any redundant resolved keys require consistency assertions. |
+| `bridge_customer_account` | Effective-dated customer↔account ownership edge | One row per `(account_id, valid_from)` window. An account is held by exactly one customer at a time. `valid_from`/`valid_to` half-open interval; `valid_to` NULL = currently active. The current row's `customer_id` must agree with `dim_account.customer_id`. |
+| `bridge_account_premise` | Effective-dated account↔premise tenancy link | Which account was billing-responsible for a premise during which `[link_start_date, link_end_date)` window — move-in/move-out and tenant turnover. One open link per premise; closed links are prior-customer tenancy windows. `tenancy_type`, `link_termination_reason`. The tenancy-timeline UI reads the **full history**, not just `is_current`. |
 | `meter_installation` | Effective-dated meter↔service_point placement | The meter-swap mechanism: `[installation_date, removal_date)`, `to_meter_id` chains original→replacement. How a reading resolves to the meter actually installed on its date. |
 | `bridge_premise_owner` | Sparse, dated, account-backed owner→premise edge | `party_id` FK **into `dim_customer`** (an owner is always a party — no separate owner dimension), `basis` (owner_pays / owner_occupied / landlord_agreement), `owns_from`/`owns_to`/`is_current`. Only ownership a utility can actually observe; most premises legitimately have no row. Feeds the Owners lens and Owner inspector. |
+| `hierarchy_version` | Flattened operational hierarchy path per validity interval | One row per `(root_customer_id, customer_id, account_id, premise_id, service_point_id, meter_id, valid_from)`. Resolve point-in-time: `valid_from <= :date AND (valid_to IS NULL OR :date < valid_to)`. `root_customer_id` = portfolio parent or `customer_id` when no parent. `meter_id` nullable (service point may be unmetered). |
+| `dim_premise_history` | Selective premise attribute history — one row per `(premise_id, valid_from)` | Tracks service status, service class, and building classification changes only. Geometry and enrichment attributes are NOT versioned. Does **not** join into `hierarchy_version` — that table's row count must be unchanged when premise history is added. Use for point-in-time premise-attribute lookup at the address grain. |
 
 Geography / lookup dims:
 
@@ -108,18 +114,19 @@ key columns per table:
 
 | Table | Grain | Notes |
 |---|---|---|
-| `fact_meter_readings_daily` | (service_point, date) | **Physical grain only — deliberately no `account_id`/`customer_id`.** Occupants change mid-window; stamping a "current occupant" on physical rows is wrong by construction. |
+| `fact_meter_readings_daily` | (service_point, date) | **Physical grain only — deliberately no `account_id`/`customer_id`.** Customers change mid-window; stamping a "current customer" on physical rows is wrong by construction. |
 | `fact_customer_hourly_load_profile` | (service_point, year_month, day_type, hour_of_day) | Pre-aggregated hourly shape; same physical-grain discipline. |
-| `fact_meter_readings_monthly` | (account, year, month) | **The one place account/customer attribution happens**: each reading resolves to the service agreement whose half-open window covers its date. Carries `customer_id`, `service_point_id`, `premise_id`. |
+| `fact_meter_readings_monthly` | **(account_id, service_point_id, month_end_date_key)** | **The one place account/customer attribution happens**: each reading resolves to the service agreement whose half-open window covers its date. `customer_id`/`premise_id` are month-end attributions (not GROUP BY keys). `customer_changed_mid_month=true` flags transition months so consumers can detect them. Account-month consumers must aggregate across service points explicitly. |
 | `fact_customer_billing` | (account, bill) | Computed YoY / bill-shock columns are derived over a deduplicated (account, calendar-month) grain. |
 | `fact_payment_history` | (payment) | `account_id`, `customer_id`, lateness bucketing. |
-| `fact_customer_complaints` | (complaint) | Event + verbatim text 1:1. |
+| `fact_customer_complaints` | (complaint) | Event + verbatim text 1:1. `premise_id` is nullable, resolved via an ordered evidence chain (driver_outage → driver_bill → unique_account_link; else `NULL`/`'unresolved'`). Premise views show attributable complaints only; customer views show all. |
+| `fact_work_order` | (work_order) | One row per field-service work order. `premise_id` always non-NULL; `service_point_id`/`meter_id` NULL for premise-only orders. `customer_id`/`account_id` resolved as-of the work timestamp through `hierarchy_version` (nullable when no active customer at that time). Out of scope: crew, skills, inventory. |
 | `fact_csr_interactions` | (contact-center session) | Session level; event-level transitions stay raw. |
 | `fact_outage_events` / `fact_outage_customer_impact` | (outage) / (outage × customer) | Impact rows carry `customer_id`/`service_point_id`/`premise_id` so reliability joins geography directly. |
 | `fact_active_outage_event` / `fact_active_outage_customer_impact` | current OMS snapshot | The "live" map layer + CSR without-power banner. |
 | `fact_program_enrollment` | (enrollment) | DSM enrollments; feeds `metric_dsm_uptake`. |
 | `fact_assistance_enrollment` | (enrollment) | LIHEAP + payment plans + critical care, `program_type` discriminator. |
-| `fact_der_adoption` | (premise, device_type) | **DER is a physical install** — keyed to premise, `customer_id` is the current occupant. Multi-site customers get independent DER per site. |
+| `fact_der_adoption` | (premise, device_type) | **DER is a physical install** — keyed to premise, `customer_id` is the current customer. Multi-site customers get independent DER per site. |
 | `fact_survey_responses` / `fact_survey_invitations` | (response) / (survey, period, segment) | CSAT/NPS + the response-rate denominator; `comment_sentiment`/`comment_theme` feed the verbatim feed. |
 | `fact_digital_engagement` | (event) | Portal sessions + digital events unioned. |
 | `fact_social_mentions` | (mention) | With match-confidence band. |

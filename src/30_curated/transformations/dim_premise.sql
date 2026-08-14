@@ -15,6 +15,7 @@
 CREATE OR REFRESH MATERIALIZED VIEW dim_premise (
   premise_id         BIGINT    NOT NULL PRIMARY KEY,
   premise_number     STRING    NOT NULL,
+  source_building_id STRING,
   occupancy_class    STRING,
   primary_occupancy  STRING,
   building_subtype   STRING,
@@ -36,12 +37,13 @@ CREATE OR REFRESH MATERIALIZED VIEW dim_premise (
   sqft_band          STRING,
   _ingested_at       TIMESTAMP
 )
-COMMENT 'Premise dimension. One row per sampled FEMA building inside the utility service territory. Adds the ResStock-aligned building_subtype derivation that downstream AMI math uses. premise_id is the durable BIGINT key; premise_number is the FEMA UUID natural key. Carries native GEOMETRY (centroid_point/footprint_polygon), declared as GEOMETRY(0) to match the stored SRID.'
+COMMENT 'Premise dimension. One row per sampled FEMA building inside the utility service territory. Adds the ResStock-aligned building_subtype derivation that downstream AMI math uses. premise_id is the durable BIGINT key; premise_number is the canonical unbraced lowercase FEMA UUID natural key; source_building_id is the raw FEMA value (braced) for lineage. Carries native GEOMETRY (centroid_point/footprint_polygon), declared as GEOMETRY(0) to match the stored SRID.'
 AS
 
 SELECT
   abs(xxhash64(p.premise_id))                                             AS premise_id,
   p.premise_id                                                       AS premise_number,
+  p.source_building_id,
   p.occupancy_class,
   p.primary_occupancy,
 

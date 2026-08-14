@@ -31,8 +31,8 @@ WITH bills AS (
   -- worst per-account shock — one shocked site is enough to trigger a
   -- complaint, which is also how the generator rolls (per bill).
   -- COUNT(DISTINCT account_id), not COUNT(*): a relocation's transition
-  -- month bills the SAME account across two usage_points (temporal-realism
-  -- §5.1/§5.2), producing two bill rows for one account — COUNT(*) would
+  -- month bills the SAME account across two service points, producing two
+  -- bill rows for one account — COUNT(*) would
   -- misread a residential mover's move month as a 2-site chain.
   SELECT
     b.customer_id,

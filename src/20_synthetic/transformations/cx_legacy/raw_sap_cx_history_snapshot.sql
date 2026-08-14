@@ -34,7 +34,7 @@ quarter_dates AS (
 ),
 
 -- ~60% of customers existed in the SAP era. Sample by hash.
--- historical era: prior occupants WERE real customers then; intentionally NOT filtered
+-- historical era: prior customers WERE real customers then; intentionally NOT filtered
 customer_sample AS (
   SELECT
     c.customer_id, c.archetype, c.customer_class, c.income_band, c.tenure

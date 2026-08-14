@@ -5,15 +5,66 @@ set -euo pipefail
 # directory only (via `source_code_path: app/deploy/`) so the Apps runtime
 # never sees package.json and skips its auto `npm install` entirely.
 #
-# See docs/conventions.md § "Apps deployment pattern".
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$here"
+
+# Load local, gitignored dev values (catalog/schema/genie/auth mode) when present
+# so a maintainer's build stages their real environment. Public defaults live in
+# app.yaml as neutral placeholders; this file overrides them without editing it.
+[ -f scripts/dev-env.sh ] && . scripts/dev-env.sh
 
 rm -rf deploy
 mkdir -p deploy
 
 cp app.yaml deploy/
+
+# Per-environment app.yaml env values. Each is overridden from the matching env
+# var when set (so deploying to another workspace needs no edit to app.yaml —
+# just export the var before `npm run build`); when unset, app.yaml's own value
+# is kept as the default. A value that ends up EMPTY aborts the stage: an empty
+# DATABRICKS_GENIE_SPACE_ID is the exact shape the Apps runtime rejects at deploy
+# ("Must specify environment variable source using either value or valueFrom"),
+# and a wrong-empty catalog/schema silently points the app at the wrong data.
+python3 - "$here/deploy/app.yaml" <<'PY'
+import os, re, sys
+
+path = sys.argv[1]
+text = open(path).read()
+# Only override a var when its env value is explicitly set; otherwise keep the
+# app.yaml default already present in the file.
+overrides = {
+    name: os.environ[name]
+    for name in ("DATABRICKS_CATALOG", "DATABRICKS_SCHEMA",
+                 "DATABRICKS_GENIE_SPACE_ID", "DATABRICKS_AUTH_MODE")
+    if name in os.environ
+}
+
+def replace_value(text, name, value):
+    # Rewrite the `value:` line that immediately follows `- name: <NAME>`.
+    pat = re.compile(r"(- name:\s*" + re.escape(name) + r"\s*\n\s*value:\s*).*")
+    new, n = pat.subn(lambda m: m.group(1) + value, text, count=1)
+    if n != 1:
+        sys.exit(f"stage-deploy: could not find env entry {name!r} in app.yaml to override")
+    return new
+
+for name, value in overrides.items():
+    text = replace_value(text, name, value)
+
+open(path, "w").write(text)
+
+# Fail loudly on any empty resolved value among the four managed env entries.
+for name in ("DATABRICKS_CATALOG", "DATABRICKS_SCHEMA",
+             "DATABRICKS_GENIE_SPACE_ID", "DATABRICKS_AUTH_MODE"):
+    m = re.search(r"- name:\s*" + re.escape(name) + r"\s*\n\s*value:\s*(.*)", text)
+    if not m or not m.group(1).strip():
+        sys.exit(f"stage-deploy: {name} resolved to an empty value — refusing to "
+                 f"stage a deploy the Apps runtime would reject. Set env {name} or "
+                 f"restore its value in app/app.yaml.")
+print("  app.yaml env: " + (", ".join(f"{k}={v}" for k, v in overrides.items())
+                             if overrides else "kept app.yaml defaults (no env overrides)"))
+PY
+
 cp -R build dist deploy/
 [ -d config ] && cp -R config deploy/
 

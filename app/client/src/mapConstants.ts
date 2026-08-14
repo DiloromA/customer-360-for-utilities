@@ -160,6 +160,21 @@ export interface LayerSpec {
   goodWhenHigh?: boolean;     // for legend coloring
   subLayer?: boolean;         // reachable only as a sub-view; hidden from the dropdown
   isLiveOutage?: boolean;     // real-time "currently out of power" layer (own data path)
+  // The metric is attributed to CUSTOMERS at the source and does not re-grain
+  // when the master grain toggle flips (complaint events carry customer_id
+  // always but premise_id only ~65% of the time — see fact_customer_complaints
+  // premise attribution). The legend keeps its "per customer" framing at every
+  // grain and, off customer grain, prints a note so the fixed grain reads as
+  // intentional rather than a mislabel. See docs/feature-backlog.md "grain-aware
+  // complaint metrics" for the deeper Option B (re-grain the numerator).
+  customerAttributed?: boolean;
+  // Grains this layer honestly supports. When a grain is not in this list, the
+  // grain selector greys it and snap-and-remember kicks in on layer switch.
+  // Absent = supports all grains (premise + customer).
+  // Bucket 1 (premise-physical): ['premise', 'customer']
+  // Bucket 2 (customer-native — no premise truth to recover): ['customer']
+  // Bucket 3 (dual/partial): ['premise', 'customer'] (unmapped footnote covers the gap)
+  supportedGrains?: ReadonlyArray<'premise' | 'customer'>;
   // How individual customer dots are colored/labelled at the "dots" tier for
   // this layer. `field` is a key of the per-customer PointRow. Absent = the
   // layer has no per-customer dot metric (dots fall back to plain attention).
@@ -177,12 +192,12 @@ export interface LayerSpec {
 // sub-dropdown in the toolbar (see COMPLAINT_THEME_GROUPS in ExplorerMap); the
 // layer's `property` is then swapped to the per-theme rate at render time.
 export const LAYERS: LayerSpec[] = [
-  { id: "complaints_per_1k", label: "Complaint volume",        kind: "numeric",          property: "complaints_per_1k_90d",    unit: "/1K", unitNote: "per 1,000 customers · 90d", description: "Complaints per 1,000 customers in the last 90 days.", dotMetric: { field: "recent_complaint_count_90d", label: "Complaints", unit: "", reversed: false } },
-  { id: "complaint_risk",    label: "Complaint risk (predicted)", kind: "numeric",       property: "avg_complaint_risk_pct",   unit: "%", unitNote: "predicted P(complaint · 30d) · avg %", description: "Model-predicted probability of a complaint in the next 30 days (ml_complaint_predictor), averaged per cell. Where complaints are likely to come from next, vs. the volume layer's where they already happened.", dotMetric: { field: "complaint_risk_pct", label: "Complaint risk", unit: "%", reversed: false } },
-  { id: "outage_exposure",   label: "Outage exposure",         kind: "numeric",          property: "avg_outage_min_per_customer_90d", unit: "min", description: "Average outage minutes per customer in the last 90 days.", dotMetric: { field: "recent_outage_minutes_90d", label: "Outage minutes", unit: " min", reversed: false } },
-  { id: "digital_adoption",  label: "Digital adoption",        kind: "numeric_reversed", property: "avg_digital_adoption",     unit: "/100", unitNote: "avg score · 0-100", description: "Average digital-adoption score (autopay, paperless, mobile app, portal use, EE-program participation). Higher = more digitally engaged.", goodWhenHigh: true, dotMetric: { field: "digital_adoption_score", label: "Digital adoption", unit: "/100", reversed: true } },
-  { id: "program_enrolled",  label: "Program adoption",        kind: "numeric_reversed", property: "pct_enrolled",             unit: "%",         description: "Per-customer dots colored by enrollment in the selected program, cross-referenced against the DER signal it targets (see legend). Zoomed out, a hex grid shaded by enrollment rate.", needsProgram: true, goodWhenHigh: true },
-  { id: "active_outages",    label: "Active outages (live)",   kind: "numeric",          property: "pct_currently_out",        unit: "%", unitNote: "% currently out · live", description: "Real-time OMS snapshot: which customers are without power right now. Zoomed out, a hex grid shaded by the share of customers currently out; zoomed in, each out customer is a dot and each open incident a marker with its restoration ETA.", isLiveOutage: true },
+  { id: "complaints_per_1k", label: "Complaint volume",        kind: "numeric",          property: "complaints_per_1k_90d",    unit: "/1K", unitNote: "per 1,000 customers · 90d", supportedGrains: ['premise', 'customer'] as const, description: "Complaints per 1,000 customers in the last 90 days.", dotMetric: { field: "recent_complaint_count_90d", label: "Complaints", unit: "", reversed: false } },
+  { id: "complaint_risk",    label: "Complaint risk (predicted)", kind: "numeric",       property: "avg_complaint_risk_pct",   unit: "%", unitNote: "predicted P(complaint · 30d) · avg %", supportedGrains: ['customer'] as const, customerAttributed: true, description: "Model-predicted probability of a complaint in the next 30 days (ml_complaint_predictor), averaged per cell. Where complaints are likely to come from next, vs. the volume layer's where they already happened.", dotMetric: { field: "complaint_risk_pct", label: "Complaint risk", unit: "%", reversed: false } },
+  { id: "outage_exposure",   label: "Outage exposure",         kind: "numeric",          property: "avg_outage_min_per_customer_90d", unit: "min", supportedGrains: ['premise', 'customer'] as const, description: "Average outage minutes per customer in the last 90 days.", dotMetric: { field: "recent_outage_minutes_90d", label: "Outage minutes", unit: " min", reversed: false } },
+  { id: "digital_adoption",  label: "Digital adoption",        kind: "numeric_reversed", property: "avg_digital_adoption",     unit: "/100", unitNote: "avg score · 0-100", supportedGrains: ['customer'] as const, description: "Average digital-adoption score (autopay, paperless, mobile app, portal use, EE-program participation). Higher = more digitally engaged.", goodWhenHigh: true, dotMetric: { field: "digital_adoption_score", label: "Digital adoption", unit: "/100", reversed: true } },
+  { id: "program_enrolled",  label: "Program adoption",        kind: "numeric_reversed", property: "pct_enrolled",             unit: "%",         supportedGrains: ['premise', 'customer'] as const, description: "Per-customer dots colored by enrollment in the selected program, cross-referenced against the DER signal it targets (see legend). Zoomed out, a hex grid shaded by enrollment rate.", needsProgram: true, goodWhenHigh: true },
+  { id: "active_outages",    label: "Active outages (live)",   kind: "numeric",          property: "pct_currently_out",        unit: "%", unitNote: "% currently out · live", supportedGrains: ['premise', 'customer'] as const, description: "Real-time OMS snapshot: which customers are without power right now. Zoomed out, a hex grid shaded by the share of customers currently out; zoomed in, each out customer is a dot and each open incident a marker with its restoration ETA.", isLiveOutage: true },
 ];
 
 // ────────────────────────────────────────────────────────────────────
@@ -256,9 +271,7 @@ export function dotOpacityForZoom(zoom: number): number {
 // total and only samples above it), so the limit itself doesn't need to vary
 // with zoom — it's sized by the wire, not by how bounded the viewport is.
 // 35,000 keeps the JSON payload comfortably under the Statement Execution
-// API's ~25 MiB INLINE disposition ceiling and the fetch interactive (see the
-// map-resize-desync design doc's Phase 0 timing numbers — measured against
-// the dense-100k dataset).
+// API's ~25 MiB INLINE disposition ceiling and the fetch interactive.
 export const POINTS_LIMIT = 35000;
 
 // ────────────────────────────────────────────────────────────────────

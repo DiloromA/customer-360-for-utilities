@@ -25,24 +25,24 @@ WITH
 
 -- Customer + their premise + circuit (same derivation the historical impact and
 -- active-event tables use). The affected party is the premise's CURRENT
--- occupant. A sub-metered commercial premise (temporal-realism §5.3) has 2-5
--- usage_points, which would otherwise fan this out to duplicate rows for the
+-- customer. A sub-metered commercial premise has 2-5
+-- service points, which would otherwise fan this out to duplicate rows for the
 -- same customer — an outage takes out the whole building, not one meter, so
 -- QUALIFY collapses back to one row per customer (same idiom
--- raw_dsm_enrollment.sql uses for multi-usage_point DER).
+-- raw_dsm_enrollment.sql uses for multi-service point DER).
 customer_circuit AS (
   SELECT
     c.customer_id,
     p.premise_id,
-    up.usage_point_id,
+    up.service_point_id,
     c.critical_care_flag,
     CAST(abs(xxhash64(p.census_tract, p.county_fips)) % 1000 AS INT) AS circuit_id
   FROM ${customer_master_schema}.raw_premises p
-  JOIN ${customer_master_schema}.raw_service_location sl ON sl.premise_id = p.premise_id
-  JOIN ${customer_master_schema}.raw_usage_point up ON up.service_location_id = sl.service_location_id
+  JOIN ${customer_master_schema}.raw_premise_service_attrs sl ON sl.premise_id = p.premise_id
+  JOIN ${customer_master_schema}.raw_service_point up ON up.service_location_id = sl.service_location_id
   JOIN ${customer_master_schema}.raw_premise_customer_map m ON m.premise_id = p.premise_id
   JOIN ${customer_master_schema}.raw_customer c ON c.customer_id = m.current_customer_id
-  QUALIFY ROW_NUMBER() OVER (PARTITION BY c.customer_id ORDER BY up.usage_point_id) = 1
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY c.customer_id ORDER BY up.service_point_id) = 1
 ),
 
 circuit_size AS (
@@ -61,7 +61,7 @@ joined AS (
     o.affected_customer_count,
     cc.customer_id,
     cc.premise_id,
-    cc.usage_point_id,
+    cc.service_point_id,
     cc.critical_care_flag,
     cs.circuit_customer_count,
     abs(xxhash64(o.active_outage_id, cc.customer_id, 'hit', ${random_seed})) % 1000000 AS r_hit_mil
@@ -75,7 +75,7 @@ SELECT
   active_outage_id,
   customer_id,
   premise_id,
-  usage_point_id,
+  service_point_id,
   circuit_id,
 
   snapshot_at,

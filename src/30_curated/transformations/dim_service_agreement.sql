@@ -7,7 +7,7 @@
 -- and agreement_seq=2 on the new rate, is_current=true).
 --
 -- It is also the as-of resolution source for facts: a meter reading keyed only
--- by usage_point resolves its account/customer/rate via the agreement whose
+-- by service point resolves its account/customer/rate via the agreement whose
 -- [effective_date, termination_date) window contains the reading timestamp.
 --
 -- KEYS: service_agreement_id BIGINT durable key; service_agreement_number the
@@ -44,7 +44,7 @@ SELECT
   sa.account_id                      AS account_number,
   abs(xxhash64(sa.customer_id))           AS customer_id,
   abs(xxhash64(sa.premise_id))            AS premise_id,
-  abs(xxhash64(sa.usage_point_id))        AS service_point_id,
+  abs(xxhash64(sa.service_point_id))        AS service_point_id,
   sa.rate_schedule,
   sa.effective_date,
   sa.termination_date,

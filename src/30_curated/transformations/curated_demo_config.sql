@@ -1,5 +1,5 @@
 -- Demo config anchor — the single app-side source of truth for "now" and the
--- display window (temporal-realism-scoping §3).
+-- display window.
 -- App queries CROSS JOIN this 1-row table and express windows relative to
 -- cfg.as_of_date (e.g. DATE_SUB(cfg.as_of_date, cfg.complaint_window_days))
 -- instead of a literal DATE'2018-12-31'. Static/derived from bundle vars —

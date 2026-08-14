@@ -8,11 +8,11 @@ import "@xyflow/react/dist/style.css";
 import dagre from "@dagrejs/dagre";
 import { KeyRound, Link2, ExternalLink, RotateCcw } from "lucide-react";
 
-// The dynamic ERD (design doc §5/§8): a live entity-relationship diagram over
+// The dynamic ERD: a live entity-relationship diagram over
 // Unity Catalog metadata, served by GET /api/data-model/erd. The curated star
 // is selected as a layer (its dim_/fact_/bridge_ role prefixes together), not
 // a single naming prefix; raw_/ml_/app_ each select by their own prefix.
-// Declaring FOREIGN KEY constraints table by table (§8) is ongoing; the
+// Declaring FOREIGN KEY constraints table by table is ongoing; the
 // server marks each edge `inferred` per-edge (declared → solid,
 // convention-guessed → dashed) and sets the top-level `edgesAreInferred`
 // while any edge is still convention-inferred, which drives the banner below.
@@ -192,7 +192,7 @@ function DataModelInner() {
   }, []);
 
   // Core star (dim/fact/bridge) is always shown; SCD2 history is an opt-in
-  // toggle (design doc §5.5 — a 46-table schema is too much at once). The
+  // toggle (a 46-table schema is too much at once). The
   // history classification is curated-star-specific — raw_/ml_/app_ layers
   // show every table unconditionally.
   const visibleTables = useMemo(() => {
@@ -228,12 +228,16 @@ function DataModelInner() {
     return { nodes: nodesOut, edges: edgesOut };
   }, [visibleTables, visibleEdges, expanded, toggleExpanded]);
 
-  // Re-fit whenever the graph's shape changes (layer/scope/expand toggles).
+  // Re-fit when the table set changes — a layer switch (reloads `erd`) or the
+  // SCD2-history toggle. Deliberately NOT on `nodes`: expanding a table's
+  // columns changes `nodes` but should leave the camera where the user put it,
+  // rather than zooming back out to fit the whole diagram.
   useEffect(() => {
     if (nodes.length === 0) return;
     const id = requestAnimationFrame(() => fitView({ padding: 0.2, duration: 200 }));
     return () => cancelAnimationFrame(id);
-  }, [nodes, fitView]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [erd, showHistory, fitView]);
 
   if (loading && !erd) return <div className="loading">Loading data model…</div>;
   if (error) return <div className="error">{error}</div>;

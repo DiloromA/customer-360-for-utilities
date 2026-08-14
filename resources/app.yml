@@ -8,35 +8,15 @@ resources:
       name: customer-360-for-utilities
       description: "Customer 360 for Utilities — executive map (value hex-grid + dots), conversational 'Ask the map' (Genie), box/lasso targeting, plus CSR and program views. Reads the single ${var.schema} schema."
       source_code_path: ../app/deploy/
-      # WARNING (2026-07-13): this `config:` block is deprecated and CLI v1.1.0+
-      # silently ignores it — the env overrides below never reach the app (the
-      # 2026-07-13 empty-map incident: the app booted with app.yaml's fallback
-      # catalog `main`). The real env now lives in app/app.yaml with concrete
-      # values; this block is kept only for older CLIs that still apply it.
-      config:
-        command:
-          - bash
-          - -c
-          - |
-            for f in config/queries/*.sql; do
-              sed -i "s#{{catalog}}#${DATABRICKS_CATALOG}#g; s#{{schema}}#${DATABRICKS_SCHEMA}#g" "$f"
-            done
-            exec node build/server.mjs
-        env:
-          - name: NODE_ENV
-            value: production
-          - name: DATABRICKS_WAREHOUSE_ID
-            value_from: sql-warehouse
-          - name: DATABRICKS_CATALOG
-            value: ${var.catalog}
-          - name: DATABRICKS_SCHEMA
-            value: ${var.schema}
-          # Enables "Ask the map". Set from the app_genie_space job's created
-          # space via --var genie_space_id=<id> (like warehouse_id, it's a
-          # required per-environment value; the Apps runtime rejects an empty
-          # value, so don't deploy this env with genie_space_id unset).
-          - name: DATABRICKS_GENIE_SPACE_ID
-            value: ${var.genie_space_id}
+      # OBO scopes forwarded to the end-user token. Deliberately NOT set here:
+      # SP-mode targets must OMIT the field entirely, because the databricks
+      # Terraform provider round-trips an empty list `[]` back as null and aborts
+      # the apply ("inconsistent result after apply"). Each OBO target re-adds it
+      # via a per-target resources override in databricks.yml (= [sql,
+      # dashboards.genie]) — currently dev, external, and internal; only the
+      # vestigial `prod` target is still SP and omits it. check-release-config.py's
+      # cross-check is None-guarded, so an absent field for SP targets is fine.
+      # See databricks.yml var app_user_api_scopes.
       resources:
         - name: sql-warehouse
           sql_warehouse:
@@ -48,7 +28,7 @@ resources:
       name: ${bundle.name}_app_focus_set_setup
       description: "Creates ${var.schema}.app_focus_set, the per-session cohort carrier behind the map's focus-set scoping. Idempotent; run once after deploy."
       usage_policy_id: ${var.serverless_usage_policy_id}
-      tags: { demo: customer-360-for-utilities }
+      tags: ${var.data_asset_tags}
       environments:
         - environment_key: default
           spec:
@@ -66,7 +46,7 @@ resources:
       name: ${bundle.name}_app_focus_set_ttl
       description: "Daily sweep of expired focus_set cohorts."
       usage_policy_id: ${var.serverless_usage_policy_id}
-      tags: { demo: customer-360-for-utilities }
+      tags: ${var.data_asset_tags}
       schedule:
         quartz_cron_expression: "0 0 4 * * ?"
         timezone_id: America/Detroit
@@ -88,7 +68,7 @@ resources:
       name: ${bundle.name}_app_genie_space
       description: "Creates/updates the 'Ask the Map' Genie space over the curated_* tables. Run once, then set var.genie_space_id from its output."
       usage_policy_id: ${var.serverless_usage_policy_id}
-      tags: { demo: customer-360-for-utilities }
+      tags: ${var.data_asset_tags}
       environments:
         - environment_key: default
           spec:
@@ -105,3 +85,6 @@ resources:
               warehouse_id: ${var.warehouse_id}
               # Grant the app's SP CAN_RUN on the created space (see notebook).
               app_name: ${resources.apps.customer_360.name}
+              # Genie ACL grantee selection: sp → app SP, obo → viewer_grantee.
+              auth_mode: ${var.app_auth_mode}
+              viewer_grantee: ${var.viewer_grantee}

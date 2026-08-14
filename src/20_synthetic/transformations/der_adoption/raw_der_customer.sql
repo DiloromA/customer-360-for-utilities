@@ -1,12 +1,12 @@
--- DER adoption — one row per premise / usage_point (the PHYSICAL spine) with
--- EV, PV, BESS, heat pump, and smart-thermostat ownership flags + device-
--- specific attributes. DER is a physical install on the premise, so it is keyed
--- to the usage_point, NOT the customer: a multi-site commercial chain
--- customer gets independent DER per site. The current occupant (via
--- premise_customer_map) supplies the archetype that biases adoption.
+-- DER adoption — one row per premise / service point (the PHYSICAL spine) with
+-- EV, PV, heat pump, and smart-thermostat ownership flags + device-specific
+-- attributes. DER is a physical install on the premise, so it is keyed to the
+-- service point, NOT the customer: a multi-site commercial chain customer gets
+-- independent DER per site. The current customer (via premise_customer_map)
+-- supplies the archetype that biases adoption.
 --
 -- Adoption rates are archetype-biased:
---   tech_forward             very high (EV+PV+BESS heavy)
+--   tech_forward             very high (EV+PV heavy)
 --   efficient_engaged        moderate (HP + smart-tstat focus)
 --   comfortable_indifferent  baseline (mostly smart-tstat only)
 --   cost_stressed            very low (capital-constrained)
@@ -16,37 +16,35 @@
 -- Eligibility gates that prevent unrealistic combinations:
 --   PV    : tenure=own + sqft >= 800  (renters can't host rooftop;
 --                                       tiny units have insufficient roof)
---   BESS  : requires PV               (storage adopters layer onto solar)
 --   EV L2 : amperage >= 200A          (100A panels get PHEV-only)
 --   HP    : NOT senior_fixed_income   (low retrofit propensity at fixed income)
---   commercial: only PV + smart-tstat (no EV/BESS/HP modeled)
+--   commercial: only PV + smart-tstat (no EV/HP modeled)
 --
 -- Tract-level draws yield neighborhood-effect clustering: one tract's
--- random tilts EV/PV/BESS adoption a bit higher or lower for everyone in it.
+-- random tilts EV/PV adoption a bit higher or lower for everyone in it.
 --
 -- DER draws are seeded by premise_id (physical install, stable across
--- occupant turnover), so a sub-metered premise's 2-5 usage_points
--- (temporal-realism §5.3) would otherwise all see IDENTICAL draws and clone
+-- customer turnover), so a sub-metered premise's 2-5 service points
+-- would otherwise all see IDENTICAL draws and clone
 -- the same "install" N times. DER is physically one system per building, so
 -- adopt_flags below gates every has_* flag to is_der_host = true — the
--- usage_point with the smallest id at that premise. Siblings still get a row
--- (PK is usage_point_id) but with every has_* flag false, same idiom
+-- service point with the smallest id at that premise. Siblings still get a row
+-- (PK is service_point_id) but with every has_* flag false, same idiom
 -- raw_dsm_enrollment.sql already uses to collapse multi-row DER back to one
 -- customer/building.
 
 CREATE OR REFRESH MATERIALIZED VIEW raw_der_customer (
   CONSTRAINT non_null_premise_id     EXPECT (premise_id IS NOT NULL),
-  CONSTRAINT non_null_usage_point_id EXPECT (usage_point_id IS NOT NULL),
-  CONSTRAINT bess_requires_pv        EXPECT (NOT has_bess OR has_pv),
+  CONSTRAINT non_null_service_point_id EXPECT (service_point_id IS NOT NULL),
   CONSTRAINT pv_requires_residential EXPECT (NOT has_pv OR customer_class = 'Residential' OR customer_class = 'Commercial')
 )
-COMMENT 'DER adoption — one row per premise / usage_point with EV / PV / BESS / heat pump / smart thermostat ownership flags + device-specific attributes. DER is a PHYSICAL install on the premise, so it is keyed to the physical spine (usage_point), not the customer — a multi-site commercial chain customer gets independent DER per site. customer_id is the current occupant (denormalized; biases adoption via archetype). Wide schema for AMI-synthesis convenience. Adoption is archetype-biased with realistic eligibility gates (PV requires own + sqft>=800; BESS requires PV; EV L2 requires >=200A panel) plus tract-level neighborhood-effect clustering. PK: usage_point_id. FK: usage_point_id -> raw_usage_point; premise_id -> raw_premises; customer_id -> raw_customer.'
+COMMENT 'DER adoption — one row per premise / service point with EV / PV / heat pump / smart thermostat ownership flags + device-specific attributes. DER is a PHYSICAL install on the premise, so it is keyed to the physical spine (service point), not the customer — a multi-site commercial chain customer gets independent DER per site. customer_id is the current customer (denormalized; biases adoption via archetype). Wide schema for AMI-synthesis convenience. Adoption is archetype-biased with realistic eligibility gates (PV requires own + sqft>=800; EV L2 requires >=200A panel) plus tract-level neighborhood-effect clustering. PK: service_point_id. FK: service_point_id -> raw_service_point; premise_id -> raw_premises; customer_id -> raw_customer.'
 AS
 
 WITH base AS (
   SELECT
     p.premise_id,
-    up.usage_point_id,
+    up.service_point_id,
     m.current_customer_id                                            AS customer_id,
     c.customer_class,
     c.archetype,
@@ -60,10 +58,9 @@ WITH base AS (
 
     -- Independent uniform draws per DER type, seeded by the PHYSICAL premise
     -- (DER installs are physical; seeding by premise_id keeps them stable across
-    -- occupant turnover and unique per site for multi-site commercial chains).
+    -- customer turnover and unique per site for multi-site commercial chains).
     abs(xxhash64(p.premise_id, 'ev_adopt',     ${random_seed})) / CAST(9223372036854775807 AS DOUBLE) AS r_ev,
     abs(xxhash64(p.premise_id, 'pv_adopt',     ${random_seed})) / CAST(9223372036854775807 AS DOUBLE) AS r_pv,
-    abs(xxhash64(p.premise_id, 'bess_adopt',   ${random_seed})) / CAST(9223372036854775807 AS DOUBLE) AS r_bess,
     abs(xxhash64(p.premise_id, 'hp_adopt',     ${random_seed})) / CAST(9223372036854775807 AS DOUBLE) AS r_hp,
     abs(xxhash64(p.premise_id, 'tstat_adopt',  ${random_seed})) / CAST(9223372036854775807 AS DOUBLE) AS r_tstat,
 
@@ -82,20 +79,18 @@ WITH base AS (
     abs(xxhash64(p.premise_id, 'pv_tilt',      ${random_seed})) / CAST(9223372036854775807 AS DOUBLE) AS r_pv_tilt,
     abs(xxhash64(p.premise_id, 'pv_azimuth',   ${random_seed})) / CAST(9223372036854775807 AS DOUBLE) AS r_pv_azimuth,
     abs(xxhash64(p.premise_id, 'pv_install',   ${random_seed})) / CAST(9223372036854775807 AS DOUBLE) AS r_pv_install,
-    abs(xxhash64(p.premise_id, 'bess_size',    ${random_seed})) / CAST(9223372036854775807 AS DOUBLE) AS r_bess_size,
-    abs(xxhash64(p.premise_id, 'bess_dispatch',${random_seed})) / CAST(9223372036854775807 AS DOUBLE) AS r_bess_dispatch,
     abs(xxhash64(p.premise_id, 'hp_type',      ${random_seed})) / CAST(9223372036854775807 AS DOUBLE) AS r_hp_type,
     abs(xxhash64(p.premise_id, 'hp_install',   ${random_seed})) / CAST(9223372036854775807 AS DOUBLE) AS r_hp_install,
     abs(xxhash64(p.premise_id, 'tstat_brand',  ${random_seed})) / CAST(9223372036854775807 AS DOUBLE) AS r_tstat_brand,
     abs(xxhash64(p.premise_id, 'tstat_dr',     ${random_seed})) / CAST(9223372036854775807 AS DOUBLE) AS r_tstat_dr,
     abs(xxhash64(p.premise_id, 'tstat_install',${random_seed})) / CAST(9223372036854775807 AS DOUBLE) AS r_tstat_install,
 
-    -- One usage_point per premise is the DER host; siblings (sub-metered
+    -- One service point per premise is the DER host; siblings (sub-metered
     -- commercial only) get has_* = false below.
-    (ROW_NUMBER() OVER (PARTITION BY p.premise_id ORDER BY up.usage_point_id) = 1) AS is_der_host
+    (ROW_NUMBER() OVER (PARTITION BY p.premise_id ORDER BY up.service_point_id) = 1) AS is_der_host
   FROM ${customer_master_schema}.raw_premises p
-  JOIN ${customer_master_schema}.raw_service_location sl ON sl.premise_id = p.premise_id
-  JOIN ${customer_master_schema}.raw_usage_point up ON up.service_location_id = sl.service_location_id
+  JOIN ${customer_master_schema}.raw_premise_service_attrs sl ON sl.premise_id = p.premise_id
+  JOIN ${customer_master_schema}.raw_service_point up ON up.service_location_id = sl.service_location_id
   JOIN ${customer_master_schema}.raw_premise_customer_map m ON m.premise_id = p.premise_id
   JOIN ${customer_master_schema}.raw_customer c ON c.customer_id = m.current_customer_id
 ),
@@ -126,12 +121,6 @@ adopt_thresholds AS (
       WHEN archetype = 'senior_fixed_income'     THEN 0.005
       ELSE 0.0
     END                                                              AS pv_base_rate,
-    -- BESS — multiplicative on PV (only PV adopters consider BESS).
-    CASE
-      WHEN archetype = 'tech_forward'            THEN 0.25  -- 25% of PV adopters add BESS
-      WHEN archetype = 'efficient_engaged'       THEN 0.18
-      ELSE 0.0
-    END                                                              AS bess_rate_given_pv,
     -- Heat pump
     CASE
       WHEN customer_class = 'Commercial'         THEN 0.0
@@ -187,7 +176,7 @@ adopt_flags AS (
 
 SELECT
   premise_id,
-  usage_point_id,
+  service_point_id,
   customer_id,
   customer_class,
 
@@ -271,30 +260,6 @@ SELECT
   END                                                                AS pv_install_date,
 
   CASE WHEN has_pv THEN true END                                     AS pv_net_metered,
-
-  -- =============================
-  -- BESS (battery storage; only if has_pv)
-  -- =============================
-  has_pv AND r_bess < bess_rate_given_pv                             AS has_bess,
-  CASE WHEN has_pv AND r_bess < bess_rate_given_pv THEN
-    -- Capacity 10-27 kWh (Powerwall 2 era and successors)
-    ROUND(10.0 + r_bess_size * 17, 1)
-  END                                                                AS bess_capacity_kwh,
-
-  CASE WHEN has_pv AND r_bess < bess_rate_given_pv THEN
-    -- Power rating kW (continuous discharge)
-    ROUND(5.0 + r_bess_size * 5, 1)
-  END                                                                AS bess_power_kw,
-
-  CASE WHEN has_pv AND r_bess < bess_rate_given_pv THEN 0.90 END     AS bess_round_trip_efficiency,
-
-  CASE WHEN has_pv AND r_bess < bess_rate_given_pv THEN
-    CASE
-      WHEN r_bess_dispatch < 0.55 THEN 'tou_arbitrage'
-      WHEN r_bess_dispatch < 0.85 THEN 'peak_shave'
-      ELSE                             'backup_only'
-    END
-  END                                                                AS bess_dispatch_mode,
 
   -- =============================
   -- Heat pump

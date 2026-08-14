@@ -109,7 +109,7 @@ paperless_toggles AS (
     CAST(NULL AS STRING)                                              AS failure_reason
   FROM ${customer_master_schema}.raw_customer c
   CROSS JOIN years y
-  WHERE NOT c.is_prior_occupant                                        -- current occupants only
+  WHERE NOT c.is_prior_customer                                        -- current customers only
     AND abs(xxhash64(c.customer_id, y.year, 'toggle', ${random_seed})) % 100 < 2
 ),
 
@@ -162,7 +162,7 @@ app_installs AS (
       END
       + CASE WHEN ee.customer_id IS NOT NULL THEN 0.15 ELSE 0.0 END
     ) > abs(xxhash64(c.customer_id, 'app_install_prob', ${random_seed})) / CAST(9223372036854775807 AS DOUBLE)
-    AND NOT c.is_prior_occupant                                        -- current occupants only
+    AND NOT c.is_prior_customer                                        -- current customers only
 ),
 
 -- Password resets. ~6% of customers per year have at least one.
@@ -183,7 +183,7 @@ password_resets AS (
     CAST(NULL AS STRING)                                             AS failure_reason
   FROM ${customer_master_schema}.raw_customer c
   CROSS JOIN years y
-  WHERE NOT c.is_prior_occupant                                        -- current occupants only
+  WHERE NOT c.is_prior_customer                                        -- current customers only
     AND abs(xxhash64(c.customer_id, y.year, 'pw_reset', ${random_seed})) % 100 < 6
 ),
 
@@ -207,7 +207,7 @@ outage_alert_optins AS (
     CAST(NULL AS STRING)                                             AS failure_reason
   FROM ${customer_master_schema}.raw_customer c
   CROSS JOIN window_bounds wb
-  WHERE NOT c.is_prior_occupant                                        -- current occupants only
+  WHERE NOT c.is_prior_customer                                        -- current customers only
     AND abs(xxhash64(c.customer_id, 'outage_optin', ${random_seed})) % 100 < 42
 )
 

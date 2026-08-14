@@ -7,9 +7,9 @@
 --     grouped under a CORPORATE_PARENT account via parent_account_id
 --     (account_group='consolidated_billing'). The parent is its own row
 --     (account_group='corporate_parent', premise_id NULL — consolidated bill).
---   • Prior occupant (residential turnover): one CLOSED account per turnover
---     premise, held by the prior-occupant customer (ended pre-window for most,
---     in-window for relocations and ~40% of ordinary turnover — temporal-realism §5.2).
+--   • Prior customer (residential turnover): one CLOSED account per turnover
+--     premise, held by the prior-customer customer (ended pre-window for most,
+--     in-window for relocations and ~40% of ordinary turnover — temporal-realism).
 --
 -- account_id is per-premise (md5(premise_id+'_acct')) for the live account, so a
 -- chain customer cleanly holds N distinct accounts. Attributes (rate, autopay,
@@ -24,10 +24,10 @@ CREATE OR REFRESH MATERIALIZED VIEW raw_customer_account (
   ),
   CONSTRAINT valid_status EXPECT (current_status IN ('active','suspended','closed'))
 )
-COMMENT 'Customer Account — CIM CustomerAccount, one billing account per premise (customer→account is 1:many). Commercial-chain accounts are grouped under a corporate_parent account via parent_account_id (consolidated billing). Prior-occupant turnover premises carry a closed account that ended before or within the fact window. Rate schedule follows the utility''s rate schedule (D1 standard residential, D1.2 critical care, D3 low-income, D8 EV TOU, D3/D4/D6 commercial by size). PK: account_id. FK: customer_id -> customer.customer_id, premise_id -> premises.premise_id, parent_account_id -> customer_account.account_id.'
+COMMENT 'Customer Account — CIM CustomerAccount, one billing account per premise (customer→account is 1:many). Commercial-chain accounts are grouped under a corporate_parent account via parent_account_id (consolidated billing). Prior-customer turnover premises carry a closed account that ended before or within the fact window. Rate schedule follows the utility''s rate schedule (D1 standard residential, D1.2 critical care, D3 low-income, D8 EV TOU, D3/D4/D6 commercial by size). PK: account_id. FK: customer_id -> customer.customer_id, premise_id -> premises.premise_id, parent_account_id -> customer_account.account_id.'
 AS
 
--- ── Per-premise account context (current occupant) ──────────────────────────
+-- ── Per-premise account context (current customer) ──────────────────────────
 WITH ctx AS (
   SELECT
     m.premise_id,
@@ -56,7 +56,7 @@ current_accounts AS (
   -- carried-over account (supplied by prior_accounts below with premise_id
   -- overridden to here), NOT a fresh default account for this premise —
   -- otherwise the destination premise would spawn a second, orphaned account
-  -- with no account_premise_link row at all (temporal-realism §5.1).
+  -- with no account_premise_link row at all.
   SELECT
     md5(CONCAT(premise_id, '_acct'))                               AS account_id,
     customer_id,
@@ -134,9 +134,9 @@ parent_accounts AS (
   GROUP BY parent_account_id, customer_id
 ),
 
--- ── Prior-occupant accounts (closed before the fact window — or, for a
+-- ── Prior-customer accounts (closed before the fact window — or, for a
 -- relocation origin, the mover's account, still active at the paired
--- destination premise: temporal-realism §5.1, "the account moves with the
+-- destination premise: temporal-realism, "the account moves with the
 -- customer") ──────────────────────────────────────────────────────────────
 prior_accounts AS (
   SELECT
@@ -163,10 +163,10 @@ prior_accounts AS (
     END                                                            AS current_status
   FROM raw_premise_customer_map m
   JOIN raw_customer c ON m.prior_customer_id = c.customer_id
-  WHERE m.has_prior_occupant
+  WHERE m.has_prior_customer
 ),
 
--- Landlord-vacancy account (entity-grain-design.md §5) — one CLOSED
+-- Landlord-vacancy account — one CLOSED
 -- historical account showing the landlord itself billing-responsible for
 -- its vacancy-showcase premise, before the current tenant moved in. Purely
 -- additive: the current tenant's own account (current_accounts) is untouched.

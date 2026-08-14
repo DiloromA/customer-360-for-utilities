@@ -41,7 +41,7 @@ WITH move_in AS (
     CAST(NULL AS BIGINT)                                       AS service_point_id,
     CAST(NULL AS BIGINT)                                       AS service_agreement_id,
     CAST(NULL AS BIGINT)                                       AS meter_id,
-    CONCAT('occupancy=', apl.occupancy_type)                   AS detail
+    CONCAT('tenancy=', apl.tenancy_type)                   AS detail
   FROM ${customer_master_schema}.raw_account_premise_link apl
 ),
 move_out AS (
@@ -68,7 +68,7 @@ rate_switch AS (
     abs(xxhash64(sa.account_id))                                    AS account_id,
     abs(xxhash64(sa.customer_id))                                   AS customer_id,
     abs(xxhash64(sa.premise_id))                                    AS premise_id,
-    abs(xxhash64(sa.usage_point_id))                                AS service_point_id,
+    abs(xxhash64(sa.service_point_id))                                AS service_point_id,
     abs(xxhash64(sa.service_agreement_id))                          AS service_agreement_id,
     CAST(NULL AS BIGINT)                                       AS meter_id,
     CONCAT('to_rate=', sa.rate_schedule)                       AS detail
@@ -84,12 +84,12 @@ meter_swap AS (
     CAST(NULL AS BIGINT)                                       AS account_id,
     CAST(NULL AS BIGINT)                                       AS customer_id,
     abs(xxhash64(mi.premise_id))                                    AS premise_id,
-    abs(xxhash64(mi.usage_point_id))                                AS service_point_id,
+    abs(xxhash64(mi.service_point_id))                                AS service_point_id,
     CAST(NULL AS BIGINT)                                       AS service_agreement_id,
-    abs(xxhash64(mi.end_device_asset_id))                           AS meter_id,
-    CONCAT('to_meter=', COALESCE(mi.to_end_device_asset_id, 'n/a')) AS detail
+    abs(xxhash64(mi.meter_number))                           AS meter_id,
+    CONCAT('to_meter=', COALESCE(mi.to_meter_number, 'n/a')) AS detail
   FROM ${customer_master_schema}.raw_meter_installation mi
-  WHERE mi.to_end_device_asset_id IS NOT NULL AND mi.removal_date IS NOT NULL
+  WHERE mi.to_meter_number IS NOT NULL AND mi.removal_date IS NOT NULL
 )
 SELECT service_event_id, event_type, event_date, account_id, customer_id, premise_id,
        service_point_id, service_agreement_id, meter_id, detail,

@@ -16,6 +16,11 @@ app/deploy/
 app/.npmrc
 app/package-lock.json
 
+# Local deploy values (real workspace catalog/schema/genie/warehouse ids). Auto-
+# sourced by app/scripts/{stage-deploy,grant-permissions}.sh so personal
+# environment ids stay out of the public repo; committed defaults are neutral.
+app/scripts/dev-env.sh
+
 # Databricks bundle state
 .databricks/
 .databricks-resources.json
@@ -27,11 +32,27 @@ app/package-lock.json
 .mcp.json
 
 # Local AI tooling (machine-specific absolute paths; .claude holds ~165MB of
-# ai-dev-kit-installed skill copies)
+# ai-dev-kit-installed skill copies). .agents/ and .github/skills/ are more
+# ai-dev-kit skill copies — scoped to skills/ so real .github workflows or
+# templates can still be tracked.
 .ai-dev-kit/
 .claude/
 .cursor/
+.agents/
+.codex/
+.github/skills/
+.isaac/
+.vscode/
 
 # Python bytecode
 __pycache__/
 *.pyc
+
+# Token-efficiency experiment scratch. The experiment's source is tracked only
+# on the experiment/token-efficiency-study branch (which carries its own
+# .gitignore with these same rules) and is deliberately never merged to main.
+# These rules stop the ~690MB of local scratch left on disk from showing up
+# dirty while working on other branches.
+experiments/token_efficiency/.venv/
+experiments/token_efficiency/mlflow.db
+experiments/token_efficiency/run_*.log

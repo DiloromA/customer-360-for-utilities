@@ -46,7 +46,7 @@ CREATE OR REFRESH MATERIALIZED VIEW dim_account_history (
   CONSTRAINT fk_dah_customer FOREIGN KEY (customer_id) REFERENCES dim_customer (customer_id) NOT ENFORCED RELY,
   CONSTRAINT fk_dah_premise FOREIGN KEY (premise_id) REFERENCES dim_premise (premise_id) NOT ENFORCED RELY
 )
-COMMENT 'Account SCD Type 2 history (built via AUTO CDC ... STORED AS SCD TYPE 2). One row per account status version with [effective_from, effective_to) validity (effective_to NULL = current). The tracked attribute is current_status (active -> suspended/closed). account_sk is the per-version surrogate; account_id is the durable BIGINT key.'
+COMMENT 'Account SCD Type 2 history (built via AUTO CDC ... STORED AS SCD TYPE 2). One row per account status version with [effective_from, effective_to) validity (effective_to NULL = current). The tracked attribute is current_status (active -> suspended/closed). account_sk is the per-version surrogate; account_id is the durable BIGINT key. premise_id is the premise as of that version''s window — a history row is an as-of snapshot, so the placement it records is correct for that window.'
 AS
 SELECT
   abs(xxhash64(CONCAT(account_id, '|', CAST(__START_AT AS STRING))))               AS account_sk,
