@@ -24,10 +24,10 @@ variables:
   # ── The two you must set per environment ──────────────────────────────
   catalog:
     description: "Existing Unity Catalog to deploy into (must already exist)."
-    default: main
+    default: utilities
   schema:
     description: "The single schema this demo creates and owns. All raw_/dim_/fact_/bridge_/metric_/ml_/app_ tables land here."
-    default: customer_360_test
+    default: customer_360
 
   # ── App inputs ────────────────────────────────────────────────────────
   warehouse_id:
@@ -196,6 +196,9 @@ targets:
       apps:
         customer_360:
           user_api_scopes: ${var.app_user_api_scopes}
+    permissions:
+      - user_name: metastore_stewards
+        level: CAN_MANAGE
   prod:
     mode: production
     # Per-target root_path so production targets never share a deploy tree (the
